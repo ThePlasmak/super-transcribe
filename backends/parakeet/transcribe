@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Wrapper: activates parakeet venv and runs transcribe.py
+# Auto-runs setup if venv doesn't exist
+
+BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_PYTHON="$BACKEND_DIR/venv/bin/python"
+SETUP_SCRIPT="$BACKEND_DIR/setup.sh"
+
+if [ ! -f "$VENV_PYTHON" ]; then
+    echo "🦜 Parakeet not set up yet. Running setup..." >&2
+    echo "" >&2
+
+    if [ -f "$SETUP_SCRIPT" ]; then
+        bash "$SETUP_SCRIPT"
+        echo "" >&2
+
+        if [ ! -f "$VENV_PYTHON" ]; then
+            echo "❌ Setup failed. Please check errors above." >&2
+            exit 1
+        fi
+    else
+        echo "❌ Setup script not found: $SETUP_SCRIPT" >&2
+        exit 1
+    fi
+fi
+
+exec "$VENV_PYTHON" "$BACKEND_DIR/transcribe.py" "$@"

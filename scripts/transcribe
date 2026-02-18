@@ -1,0 +1,366 @@
+#!/usr/bin/env bash
+# Super-transcribe: unified entry point that routes to faster-whisper or parakeet
+# Both backends are bundled — lazy-loaded on first use
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKILL_DIR="$(dirname "$SCRIPT_DIR")"
+
+FW_DIR="$SKILL_DIR/backends/faster-whisper"
+PK_DIR="$SKILL_DIR/backends/parakeet"
+
+FW_TRANSCRIBE="$FW_DIR/transcribe"
+PK_TRANSCRIBE="$PK_DIR/transcribe"
+
+# ── Helpers ────────────────────────────────────────────────────────────
+
+die()  { echo "❌ $*" >&2; exit 1; }
+info() { echo "🎙️ $*" >&2; }
+
+backend_available() {
+    case "$1" in
+        faster-whisper) [ -d "$FW_DIR" ] && [ -f "$FW_TRANSCRIBE" ] ;;
+        parakeet)       [ -d "$PK_DIR" ] && [ -f "$PK_TRANSCRIBE" ] ;;
+        *)              return 1 ;;
+    esac
+}
+
+backend_ready() {
+    case "$1" in
+        faster-whisper) [ -f "$FW_DIR/.venv/bin/python" ] ;;
+        parakeet)       [ -f "$PK_DIR/venv/bin/python" ] ;;
+        *)              return 1 ;;
+    esac
+}
+
+run_backend() {
+    local backend="$1"
+    shift
+    case "$backend" in
+        faster-whisper) exec "$FW_TRANSCRIBE" "$@" ;;
+        parakeet)       exec "$PK_TRANSCRIBE" "$@" ;;
+    esac
+}
+
+# ── Usage ──────────────────────────────────────────────────────────────
+
+usage() {
+    cat <<'EOF'
+🎙️ super-transcribe — Unified speech-to-text
+
+Routes to the best bundled backend (faster-whisper or parakeet) based on
+your task. Each backend is lazy-loaded on first use — setup runs automatically.
+
+USAGE:
+    ./scripts/transcribe [OPTIONS] AUDIO [AUDIO...]
+    ./scripts/transcribe --backend <name> [OPTIONS] AUDIO [AUDIO...]
+
+ROUTING OPTIONS (super-transcribe only):
+    --backend <name>     Force a backend: faster-whisper | parakeet
+    --backends           List available/installed backends and exit
+    --help-routing       Show auto-routing logic and exit
+    --setup <name>       Pre-install a backend without transcribing
+
+All other options are passed through to the selected backend.
+Run with --backend <name> --help to see backend-specific options.
+
+AUTO-ROUTING:
+    Parakeet is preferred when available for standard transcription
+    (best accuracy + speed + auto-punctuation).
+
+    faster-whisper is used when you need features Parakeet doesn't have:
+    diarization, translation, 99+ languages, chapters, search, RSS,
+    ASS/LRC/TTML/CSV/HTML output, filler removal, noise preprocessing, etc.
+
+EXAMPLES:
+    ./scripts/transcribe audio.mp3                       # Auto-route
+    ./scripts/transcribe --backend parakeet lecture.wav   # Force Parakeet
+    ./scripts/transcribe audio.mp3 --diarize             # Auto → faster-whisper
+    ./scripts/transcribe audio.mp3 --translate            # Auto → faster-whisper
+    ./scripts/transcribe audio.mp3 --format ass -o s.ass  # Auto → faster-whisper
+    ./scripts/transcribe --backends                       # Show what's installed
+    ./scripts/transcribe --setup faster-whisper           # Pre-install backend
+    ./scripts/transcribe --setup parakeet                 # Pre-install backend
+EOF
+    exit 0
+}
+
+show_backends() {
+    echo "Available backends:"
+    echo ""
+    for b in faster-whisper parakeet; do
+        if backend_available "$b"; then
+            if backend_ready "$b"; then
+                echo "  ✅ $b  (installed & ready)"
+            else
+                echo "  📦 $b  (bundled, not yet set up — will auto-setup on first use)"
+            fi
+        else
+            echo "  ❌ $b  (backend files missing)"
+        fi
+    done
+    echo ""
+    echo "To pre-install a backend:  ./scripts/transcribe --setup <name>"
+    echo ""
+    exit 0
+}
+
+setup_backend() {
+    local name="$1"
+    local dir setup
+    case "$name" in
+        faster-whisper|fw|whisper)
+            name="faster-whisper"; dir="$FW_DIR" ;;
+        parakeet|pk|nemo)
+            name="parakeet"; dir="$PK_DIR" ;;
+        all)
+            setup_backend "faster-whisper"
+            setup_backend "parakeet"
+            return
+            ;;
+        *)
+            die "Unknown backend '$name'. Choose: faster-whisper | parakeet | all"
+            ;;
+    esac
+    setup="$dir/setup.sh"
+    [ -f "$setup" ] || die "Setup script not found for $name"
+
+    if backend_ready "$name"; then
+        echo "✅ $name is already set up"
+    else
+        echo "🔧 Setting up $name..."
+        bash "$setup"
+        echo ""
+        if backend_ready "$name"; then
+            echo "✅ $name is ready"
+        else
+            die "$name setup may have failed — check errors above"
+        fi
+    fi
+}
+
+show_routing() {
+    cat <<'EOF'
+Auto-routing logic:
+
+1. If --backend is specified → use that backend (error if unavailable)
+2. If any faster-whisper-only flag is detected → use faster-whisper
+3. Otherwise → prefer Parakeet (if available), fall back to faster-whisper
+
+Flags that force faster-whisper:
+    --diarize, --min-speakers, --max-speakers, --speaker-names, --export-speakers
+    --translate
+    --search, --search-fuzzy
+    --detect-chapters, --chapter-gap, --chapters-file, --chapter-format
+    --rss, --rss-latest
+    --format ass|lrc|ttml|csv|tsv|html  (formats Parakeet doesn't support)
+    --clean-filler
+    --normalize, --denoise
+    --burn-in
+    --filter-hallucinations
+    --multilingual
+    --initial-prompt, --hotwords, --prefix
+    --language-map
+    --parallel
+    --channel
+    --merge-sentences
+    --detect-paragraphs, --paragraph-gap
+    --hallucination-silence-threshold
+    --no-condition-on-previous-text, --condition-on-previous-text
+    --clip-timestamps
+    --temperature (explicit)
+    --compression-ratio-threshold, --log-prob-threshold
+    --min-confidence
+    --no-vad, --vad-threshold, --vad-neg-threshold, --vad-onset, --vad-offset
+    --min-speech-duration, --max-speech-duration, --min-silence-duration, --speech-pad
+    --no-batch
+    --no-timestamps
+    --no-suppress-blank, --suppress-tokens
+    --max-initial-timestamp
+    --prepend-punctuations, --append-punctuations
+    --best-of, --patience, --repetition-penalty, --no-repeat-ngram-size
+    --prompt-reset-on-temperature
+    --chunk-length (fw meaning)
+    --max-new-tokens
+    --stats-file
+    --log-level
+    --retries
+    --keep-temp
+    --hf-token
+    --revision
+
+Flags that force Parakeet:
+    --long-form
+    --streaming
+EOF
+    exit 0
+}
+
+# ── Faster-whisper-only flags ─────────────────────────────────────────
+
+# No-value flags that force faster-whisper
+FW_ONLY_NOVAL=(
+    --diarize --translate --clean-filler --normalize --denoise
+    --filter-hallucinations --multilingual --search-fuzzy
+    --merge-sentences --detect-paragraphs --detect-chapters
+    --no-condition-on-previous-text --condition-on-previous-text
+    --no-vad --no-batch --no-timestamps --no-suppress-blank
+    --progress --keep-temp
+)
+
+# Value flags that force faster-whisper
+FW_ONLY_WITHVAL=(
+    --min-speakers --max-speakers --speaker-names --export-speakers
+    --search --chapter-gap --chapters-file --chapter-format
+    --rss --rss-latest --burn-in
+    --initial-prompt --hotwords --prefix
+    --language-map --parallel --channel
+    --paragraph-gap --hallucination-silence-threshold
+    --clip-timestamps --temperature
+    --compression-ratio-threshold --log-prob-threshold --min-confidence
+    --vad-threshold --vad-neg-threshold --vad-onset --vad-offset
+    --min-speech-duration --max-speech-duration --min-silence-duration --speech-pad
+    --suppress-tokens --max-initial-timestamp
+    --prepend-punctuations --append-punctuations
+    --best-of --patience --repetition-penalty --no-repeat-ngram-size
+    --prompt-reset-on-temperature --chunk-length --max-new-tokens
+    --stats-file --log-level --retries --hf-token --revision
+    --compute-type --threads --model-dir
+    --output-template
+)
+
+# Parakeet-only flags
+PK_ONLY_NOVAL=(--long-form --streaming)
+
+# Formats only faster-whisper handles
+FW_ONLY_FORMATS_RE="^(ass|lrc|ttml|csv|tsv|html)$"
+
+# ── Parse args ────────────────────────────────────────────────────────
+
+is_in_array() {
+    local needle="$1"; shift
+    for item in "$@"; do
+        [ "$item" = "$needle" ] && return 0
+    done
+    return 1
+}
+
+FORCED_BACKEND=""
+PASSTHROUGH=()
+needs_fw=false
+needs_pk=false
+
+while [ $# -gt 0 ]; do
+    arg="$1"
+    case "$arg" in
+        --help|-h)       usage ;;
+        --backends)      show_backends ;;
+        --help-routing)  show_routing ;;
+
+        # ── Setup command ──
+        --setup)
+            [ $# -ge 2 ] || die "--setup requires a value: faster-whisper | parakeet | all"
+            setup_backend "$2"; exit 0
+            ;;
+        --setup=*)
+            setup_backend "${arg#--setup=}"; exit 0
+            ;;
+
+        # ── Backend selection (consume, don't pass through) ──
+        --backend)
+            [ $# -ge 2 ] || die "--backend requires a value: faster-whisper | parakeet"
+            FORCED_BACKEND="$2"; shift 2; continue
+            ;;
+        --backend=*)
+            FORCED_BACKEND="${arg#--backend=}"; shift; continue
+            ;;
+
+        # ── Format check (pass through + inspect value) ──
+        -f|--format)
+            PASSTHROUGH+=("$arg")
+            if [ $# -ge 2 ]; then
+                IFS=',' read -ra fmts <<< "$2"
+                for fmt in "${fmts[@]}"; do
+                    if [[ "$fmt" =~ $FW_ONLY_FORMATS_RE ]]; then
+                        needs_fw=true; break
+                    fi
+                done
+            fi
+            ;;
+        --format=*)
+            PASSTHROUGH+=("$arg")
+            val="${arg#--format=}"
+            IFS=',' read -ra fmts <<< "$val"
+            for fmt in "${fmts[@]}"; do
+                if [[ "$fmt" =~ $FW_ONLY_FORMATS_RE ]]; then
+                    needs_fw=true; break
+                fi
+            done
+            ;;
+
+        # ── Flag classification ──
+        *)
+            if is_in_array "$arg" "${FW_ONLY_NOVAL[@]}"; then
+                needs_fw=true
+                PASSTHROUGH+=("$arg")
+            elif is_in_array "$arg" "${FW_ONLY_WITHVAL[@]}"; then
+                needs_fw=true
+                PASSTHROUGH+=("$arg")
+                # Pass through the value arg if present (not --flag=value form)
+                if [ $# -ge 2 ] && [[ ! "$2" == -* ]]; then
+                    PASSTHROUGH+=("$2"); shift
+                fi
+            elif is_in_array "$arg" "${PK_ONLY_NOVAL[@]}"; then
+                needs_pk=true
+                PASSTHROUGH+=("$arg")
+            else
+                # Check --flag=value form for fw-only flags
+                flag_part="${arg%%=*}"
+                if [ "$flag_part" != "$arg" ]; then
+                    if is_in_array "$flag_part" "${FW_ONLY_WITHVAL[@]}"; then
+                        needs_fw=true
+                    fi
+                fi
+                PASSTHROUGH+=("$arg")
+            fi
+            ;;
+    esac
+    shift
+done
+
+# ── Resolve backend ───────────────────────────────────────────────────
+
+normalize_backend() {
+    case "$1" in
+        faster-whisper|fw|whisper) echo "faster-whisper" ;;
+        parakeet|pk|nemo)          echo "parakeet" ;;
+        *)                         echo "" ;;
+    esac
+}
+
+if [ -n "$FORCED_BACKEND" ]; then
+    BACKEND=$(normalize_backend "$FORCED_BACKEND")
+    [ -n "$BACKEND" ] || die "Unknown backend '$FORCED_BACKEND'. Choose: faster-whisper | parakeet"
+    backend_available "$BACKEND" || die "Backend '$BACKEND' files are missing from $SKILL_DIR/backends/"
+elif $needs_fw && $needs_pk; then
+    die "Conflicting flags: some require faster-whisper, others require parakeet. Use --backend to pick one."
+elif $needs_fw; then
+    backend_available "faster-whisper" || die "faster-whisper backend files are missing"
+    BACKEND="faster-whisper"
+elif $needs_pk; then
+    backend_available "parakeet" || die "parakeet backend files are missing"
+    BACKEND="parakeet"
+else
+    # Default: prefer parakeet (best accuracy + speed), fall back to faster-whisper
+    if backend_available "parakeet"; then
+        BACKEND="parakeet"
+    elif backend_available "faster-whisper"; then
+        BACKEND="faster-whisper"
+    else
+        die "No transcription backends found in $SKILL_DIR/backends/"
+    fi
+fi
+
+info "Routing to $BACKEND"
+run_backend "$BACKEND" "${PASSTHROUGH[@]}"

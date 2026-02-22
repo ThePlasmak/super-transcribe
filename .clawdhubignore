@@ -1,0 +1,12 @@
+README.md
+CHANGELOG.md
+LICENSE
+
+*.zip
+
+CLAUDE.md
+requirements-test.txt
+docs/
+IMPROVEMENTS-SUMMARY*
+TEST-SCENARIOS*
+pytest.ini

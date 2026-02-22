@@ -185,23 +185,13 @@ fi
 
 echo "✓ Python $PYTHON_VERSION"
 
-# Check for ffmpeg (required)
-if ! command -v ffmpeg &> /dev/null; then
-    echo "❌ ffmpeg not found (required for audio processing)"
-    echo ""
-    echo "Install ffmpeg:"
-    if [ "$OS_TYPE" = "macos" ]; then
-        echo "   brew install ffmpeg"
-    else
-        echo "   Ubuntu/Debian: sudo apt install ffmpeg"
-        echo "   Fedora: sudo dnf install ffmpeg"
-        echo "   Arch: sudo pacman -S ffmpeg"
-    fi
-    echo ""
-    exit 1
+# Check for ffmpeg (recommended but not required for .wav input)
+if command -v ffmpeg &> /dev/null; then
+    echo "✓ ffmpeg found"
+else
+    echo "⚠️  ffmpeg not found — .wav files work natively; mp3/m4a/mp4/ogg need ffmpeg"
+    echo "   Install: sudo apt install ffmpeg (Linux) or brew install ffmpeg (macOS)"
 fi
-
-echo "✓ ffmpeg found"
 
 # Detect GPU/acceleration availability
 HAS_CUDA=false
@@ -268,37 +258,56 @@ pip_install() {
     fi
 }
 
-# Install base dependencies
+# Install base dependencies (faster-whisper + CTranslate2 — no PyTorch needed for basic transcription)
 echo "Installing faster-whisper..."
 if ! command -v uv &> /dev/null; then
     "$VENV_DIR/bin/pip" install --upgrade pip
 fi
 pip_install -r "$SCRIPT_DIR/requirements.txt"
+echo "✓ faster-whisper installed"
 
-# Install PyTorch based on platform
-if [ "$HAS_CUDA" = true ]; then
-    echo ""
-    echo "🚀 Installing PyTorch with CUDA support..."
-    echo "   This enables ~10-20x faster transcription on your GPU."
-    echo ""
-    if command -v uv &> /dev/null; then
-        uv pip install --python "$VENV_DIR/bin/python" torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+# Install PyTorch only when needed (diarization, alignment, or explicit --torch flag)
+# Basic transcription uses CTranslate2 directly — no PyTorch required.
+# This saves ~2.8GB on initial install. PyTorch auto-installs on first --diarize use.
+INSTALL_TORCH=false
+if [ "$INSTALL_DIARIZE" = true ]; then
+    INSTALL_TORCH=true
+fi
+# Also install torch if explicitly requested
+for arg in "$@"; do
+    [ "$arg" = "--torch" ] && INSTALL_TORCH=true
+done
+
+if [ "$INSTALL_TORCH" = true ]; then
+    if [ "$HAS_CUDA" = true ]; then
+        echo ""
+        echo "🚀 Installing PyTorch with CUDA support..."
+        echo "   Needed for speaker diarization and word-level alignment."
+        echo ""
+        if command -v uv &> /dev/null; then
+            uv pip install --python "$VENV_DIR/bin/python" torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+        else
+            "$VENV_DIR/bin/pip" install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+        fi
+        echo "✓ PyTorch + torchaudio with CUDA installed"
+    elif [ "$OS_TYPE" = "macos" ]; then
+        echo ""
+        echo "🍎 Installing PyTorch for macOS..."
+        pip_install torch torchaudio
+        echo "✓ PyTorch installed"
     else
-        "$VENV_DIR/bin/pip" install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-    fi
-    echo "✓ PyTorch + torchaudio with CUDA installed"
-elif [ "$OS_TYPE" = "macos" ]; then
-    echo ""
-    echo "🍎 Installing PyTorch for macOS..."
-    pip_install torch torchaudio
-    echo "✓ PyTorch installed"
-    if [ "$HAS_APPLE_SILICON" = true ]; then
-        echo "ℹ️  Note: faster-whisper uses CPU on macOS (Apple Silicon is still fast!)"
+        echo ""
+        echo "Installing PyTorch (CPU)..."
+        pip_install torch torchaudio
+        echo "✓ PyTorch (CPU) installed"
     fi
 else
     echo ""
-    echo "ℹ️  No NVIDIA GPU detected. Using CPU mode."
-    echo "   If you have a GPU, ensure CUDA drivers are installed."
+    echo "ℹ️  PyTorch not installed (not needed for basic transcription)."
+    echo "   It will auto-install if you use --diarize or word-level alignment."
+    if [ "$HAS_CUDA" = true ]; then
+        echo "   Your GPU ($GPU_NAME) will be used via CTranslate2 for transcription."
+    fi
 fi
 
 # Install diarization dependencies (optional)
@@ -331,7 +340,7 @@ echo ""
 echo "✅ Setup complete!"
 echo ""
 if [ "$HAS_CUDA" = true ]; then
-    echo "🚀 GPU acceleration enabled — expect ~20x realtime speed"
+    echo "🚀 GPU acceleration via CTranslate2 — expect ~20x realtime speed"
 elif [ "$HAS_APPLE_SILICON" = true ]; then
     echo "🍎 Apple Silicon — expect ~3-5x realtime speed on CPU"
 else
@@ -339,6 +348,9 @@ else
 fi
 if [ "$INSTALL_DIARIZE" = true ]; then
     echo "🔊 Speaker diarization enabled (--diarize flag)"
+fi
+if [ "$INSTALL_TORCH" != true ]; then
+    echo "📦 Lean install (~400MB on disk, no PyTorch). PyTorch (~2.8GB) deferred until --diarize is used."
 fi
 echo ""
 echo "Usage:"

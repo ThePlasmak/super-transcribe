@@ -35,7 +35,7 @@ try:
 except ImportError:
     print("Error: faster-whisper not installed", file=sys.stderr)
     print("Run setup: ./setup.sh", file=sys.stderr)
-    sys.exit(1)
+    sys.exit(2)  # EXIT_MISSING_DEP
 
 # Add shared lib to path
 _BACKEND_DIR = Path(__file__).resolve().parent
@@ -48,7 +48,9 @@ from lib.formatters import (
     format_duration, split_words_by_chars,
     to_srt, to_vtt, to_text, to_tsv, to_csv, to_ass, to_lrc, to_ttml, to_html, to_json,
     format_result, EXT_MAP, VALID_FORMATS,
+    format_agent_json,
 )
+from lib.exitcodes import EXIT_OK, EXIT_GENERAL, EXIT_MISSING_DEP, EXIT_BAD_INPUT, EXIT_GPU_ERROR
 from lib.postprocess import (
     filter_hallucinations, remove_filler_words, detect_paragraphs,
     merge_sentences, detect_chapters, format_chapters_output,
@@ -59,6 +61,31 @@ from lib.audio import (
 )
 from lib.speakers import apply_speaker_names, export_speakers_audio
 from lib.rss import fetch_rss_episodes
+from lib.alignment import run_alignment
+
+
+# ---------------------------------------------------------------------------
+# Batch resume support
+# ---------------------------------------------------------------------------
+
+def load_progress(progress_path):
+    """Load batch progress checkpoint file."""
+    if os.path.isfile(progress_path):
+        try:
+            with open(progress_path, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {"completed": [], "failed": []}
+
+
+def save_progress(progress_path, progress):
+    """Save batch progress checkpoint file."""
+    try:
+        with open(progress_path, "w") as f:
+            json.dump(progress, f, indent=2)
+    except IOError as e:
+        print(f"⚠️  Failed to save progress: {e}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -81,154 +108,6 @@ def check_cuda_available():
 
 
 # ---------------------------------------------------------------------------
-# Word-level alignment (wav2vec2)
-# ---------------------------------------------------------------------------
-
-_align_cache = {}  # reuse model across files in batch mode
-
-# Characters to strip before alignment (numbers, punctuation except apostrophe)
-_ALIGN_CLEAN = re.compile(r"[^a-z'\u00e0-\u00ff]")  # keep letters, ', accented
-
-
-def run_alignment(audio_path, segments, quiet=False):
-    """Refine word timestamps using wav2vec2 forced alignment (MMS model).
-
-    Tokenises each word into character-level token groups, concatenates
-    them, runs CTC forced alignment on the segment emission, then maps
-    aligned spans back to words.  Falls back per-segment on failure.
-    """
-    global _align_cache
-
-    try:
-        import torch
-        import torchaudio
-    except ImportError:
-        print(
-            "Error: torchaudio not installed (required for --precise).\n"
-            "  Reinstall with: ./setup.sh",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    if not quiet:
-        print("🎯 Refining word timestamps (wav2vec2)...", file=sys.stderr)
-
-    # --- load / cache model ---------------------------------------------------
-    if "model" not in _align_cache:
-        bundle = torchaudio.pipelines.MMS_FA
-        model = bundle.get_model()
-        try:
-            if torch.cuda.is_available():
-                model = model.to("cuda")
-                _align_cache["device"] = "cuda"
-            else:
-                _align_cache["device"] = "cpu"
-        except Exception:
-            _align_cache["device"] = "cpu"
-
-        _align_cache["model"] = model
-        _align_cache["tokenizer"] = bundle.get_tokenizer()
-        _align_cache["aligner"] = bundle.get_aligner()
-        _align_cache["sample_rate"] = bundle.sample_rate
-
-    model = _align_cache["model"]
-    tokenizer = _align_cache["tokenizer"]
-    aligner = _align_cache["aligner"]
-    target_sr = _align_cache["sample_rate"]
-    device = _align_cache["device"]
-
-    # --- load audio -----------------------------------------------------------
-    waveform, sr = torchaudio.load(audio_path)
-    if waveform.shape[0] > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)  # stereo → mono
-    if sr != target_sr:
-        waveform = torchaudio.functional.resample(waveform, sr, target_sr)
-        sr = target_sr
-
-    # --- emissions (one pass over full audio) ---------------------------------
-    with torch.inference_mode():
-        emission, _ = model(waveform.to(device))
-    emission = emission[0].cpu()  # (num_frames, num_classes)
-
-    num_samples = waveform.shape[1]
-    num_frames = emission.shape[0]
-    frame_dur = (num_samples / num_frames) / sr  # seconds per emission frame
-
-    aligned_count = 0
-
-    for seg in segments:
-        words = seg.get("words")
-        if not words:
-            continue
-
-        # tokenise each word → list of token groups [[t], [t], ...]
-        word_map = []  # (index-in-words, token_groups, group_count)
-        all_groups = []
-        for i, w in enumerate(words):
-            raw = w["word"].strip().lower()
-            cleaned = _ALIGN_CLEAN.sub("", raw)
-            if not cleaned:
-                continue
-            try:
-                groups = tokenizer(cleaned)  # [[t1], [t2], ...] per char
-                if groups:
-                    word_map.append((i, len(groups)))
-                    all_groups.extend(groups)
-            except Exception:
-                continue
-
-        if not all_groups:
-            continue
-
-        # slice emission for this segment
-        seg_start_frame = max(0, int(seg["start"] / frame_dur))
-        seg_end_frame = min(num_frames, int(seg["end"] / frame_dur))
-        seg_emission = emission[seg_start_frame:seg_end_frame]
-
-        if seg_emission.shape[0] < len(all_groups):
-            continue
-
-        try:
-            # aligner expects List[List[int]], returns List[List[TokenSpan]]
-            all_spans = aligner(seg_emission, all_groups)
-        except Exception:
-            continue
-
-        if len(all_spans) != len(all_groups):
-            continue
-
-        # map spans back to words by group count
-        grp_idx = 0
-        for orig_idx, count in word_map:
-            char_spans = all_spans[grp_idx : grp_idx + count]
-            grp_idx += count
-
-            # each char_spans[j] is [TokenSpan, ...] for one character
-            first = char_spans[0] if char_spans else []
-            last = char_spans[-1] if char_spans else []
-            if not first or not last:
-                continue
-
-            start_t = round((seg_start_frame + first[0].start) * frame_dur, 3)
-            end_t = round((seg_start_frame + last[-1].end) * frame_dur, 3)
-
-            words[orig_idx]["start"] = start_t
-            words[orig_idx]["end"] = end_t
-            aligned_count += 1
-
-        # tighten segment boundaries to aligned words
-        valid = [w for w in words if w.get("start") is not None]
-        if valid:
-            seg["start"] = valid[0]["start"]
-            seg["end"] = valid[-1]["end"]
-
-    if not quiet:
-        print(f"   Refined {aligned_count} word timestamps", file=sys.stderr)
-
-    return segments
-
-
-# ---------------------------------------------------------------------------
 # Speaker diarization
 # ---------------------------------------------------------------------------
 
@@ -237,13 +116,16 @@ def run_diarization(audio_path, segments, quiet=False, min_speakers=None, max_sp
     try:
         from pyannote.audio import Pipeline as PyannotePipeline
     except ImportError:
-        print(
-            "Error: pyannote.audio not installed.\n"
-            "  Install: ./setup.sh --diarize\n"
-            "  Or:      pip install pyannote.audio",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        # Auto-install pyannote.audio on first use
+        from lib.audio import auto_install_package
+        if not auto_install_package("pyannote.audio", quiet=quiet):
+            print(
+                "  Manual install: ./setup.sh --diarize\n"
+                "  Or:             pip install pyannote.audio",
+                file=sys.stderr,
+            )
+            sys.exit(EXIT_MISSING_DEP)
+        from pyannote.audio import Pipeline as PyannotePipeline
 
     if not quiet:
         print("🔊 Running speaker diarization...", file=sys.stderr)
@@ -263,7 +145,7 @@ def run_diarization(audio_path, segments, quiet=False, min_speakers=None, max_sp
             "  and accepted: https://hf.co/pyannote/speaker-diarization-3.1",
             file=sys.stderr,
         )
-        sys.exit(1)
+        sys.exit(EXIT_MISSING_DEP)
 
     # Move to GPU if available
     try:
@@ -439,36 +321,8 @@ def resolve_file_language(audio_path, lang_map, fallback=None):
     return fallback
 
 
-# ---------------------------------------------------------------------------
-# File resolution
-# ---------------------------------------------------------------------------
-
-AUDIO_EXTS = {
-    ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".webm",
-    ".mp4", ".mkv", ".avi", ".wma", ".aac",
-}
-
-
-def resolve_inputs(inputs):
-    """Expand globs, directories, and URLs into a flat list of audio paths."""
-    files = []
-    for inp in inputs:
-        if is_url(inp):
-            files.append(inp)
-            continue
-        expanded = sorted(glob.glob(inp, recursive=True)) or [inp]
-        for p_str in expanded:
-            p = Path(p_str)
-            if p.is_dir():
-                files.extend(
-                    str(f) for f in sorted(p.iterdir())
-                    if f.is_file() and f.suffix.lower() in AUDIO_EXTS
-                )
-            elif p.is_file():
-                files.append(str(p))
-            else:
-                print(f"Warning: not found: {inp}", file=sys.stderr)
-    return files
+# resolve_inputs and AUDIO_EXTS imported from lib.audio (shared across backends)
+from lib.audio import resolve_inputs, AUDIO_EXTS  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -635,7 +489,7 @@ def transcribe_file(audio_path, pipeline, args):
     segments_iter, info = pipeline.transcribe(effective_path, **kw)
 
     segments = []
-    full_text = ""
+    full_text_parts = []
 
     for seg in segments_iter:
         # Confidence filter (needs word-level probabilities)
@@ -644,8 +498,12 @@ def transcribe_file(audio_path, pipeline, args):
             if avg < args.min_confidence:
                 continue
 
-        full_text += seg.text
+        full_text_parts.append(seg.text.strip())
         seg_data = {"start": seg.start, "end": seg.end, "text": seg.text}
+
+        # Capture avg_logprob for confidence scoring (always available)
+        if hasattr(seg, "avg_logprob"):
+            seg_data["avg_logprob"] = seg.avg_logprob
 
         if need_words and seg.words:
             seg_data["words"] = [
@@ -699,7 +557,7 @@ def transcribe_file(audio_path, pipeline, args):
 
     result = {
         "file": Path(audio_path).name,
-        "text": full_text.strip(),
+        "text": " ".join(full_text_parts),
         "language": info.language,
         "language_probability": info.language_probability,
         "duration": dur,
@@ -801,7 +659,10 @@ def main():
     # --- Model & language ---
     p.add_argument(
         "-m", "--model", default="distil-large-v3.5",
-        help="Whisper model (default: distil-large-v3.5)",
+        help="Whisper model (default: distil-large-v3.5). "
+             "Common models: distil-large-v3.5 (fastest, best accuracy), "
+             "large-v3-turbo / turbo, large-v3, medium, small, tiny, base. "
+             "Also accepts full HuggingFace model paths.",
     )
     p.add_argument(
         "--revision", default=None, metavar="REV",
@@ -1154,6 +1015,12 @@ def main():
         help="Suppress progress messages",
     )
     p.add_argument(
+        "--agent", action="store_true",
+        help="Agent/chatbot output mode: emit a single compact JSON line to stdout "
+             "with text, duration, language, speakers, and stats. Implies --quiet. "
+             "File output (-o) still works alongside --agent.",
+    )
+    p.add_argument(
         "--log-level", default="warning",
         choices=["debug", "info", "warning", "error"],
         help="Set faster_whisper library logging level (default: warning)",
@@ -1186,6 +1053,11 @@ def main():
         "--retries", type=int, default=0, metavar="N",
         help="Retry failed files up to N times with exponential backoff "
              "(default: 0 = no retry; incompatible with --parallel)",
+    )
+    p.add_argument(
+        "--resume", default=None, metavar="PATH",
+        help="Resume batch processing from a progress checkpoint file. "
+             "Skips already-completed files. Creates the file if it doesn't exist.",
     )
 
     # --- Transcript search ---
@@ -1256,6 +1128,10 @@ def main():
             f"not a file path. Use: -o /path/to/output/dir/"
         )
 
+    # Agent mode: auto-enable quiet (suppress all stderr)
+    if args.agent:
+        args.quiet = True
+
     # Validate: need at least one audio source
     if not args.audio and not args.rss:
         p.error("AUDIO file(s) are required, or use --rss to specify a podcast feed")
@@ -1272,7 +1148,7 @@ def main():
             lang_map = parse_language_map(args.language_map)
         except Exception as e:
             print(f"Error parsing --language-map: {e}", file=sys.stderr)
-            sys.exit(1)
+            sys.exit(EXIT_BAD_INPUT)
 
     # Apply faster_whisper library logging level
     logging.basicConfig()
@@ -1333,7 +1209,7 @@ def main():
     if "-" in raw_inputs:
         if len(raw_inputs) > 1:
             print("Error: stdin '-' cannot be combined with other inputs in batch mode", file=sys.stderr)
-            sys.exit(1)
+            sys.exit(EXIT_BAD_INPUT)
         if not args.quiet:
             print("📥 Reading audio from stdin...", file=sys.stderr)
         stdin_data = sys.stdin.buffer.read()
@@ -1356,7 +1232,7 @@ def main():
 
     if not audio_files:
         print("Error: No audio files found", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_BAD_INPUT)
 
     is_batch = len(audio_files) > 1
 
@@ -1391,6 +1267,16 @@ def main():
         if is_batch:
             print(f"📁 {len(audio_files)} files queued", file=sys.stderr)
 
+    # ---- Warn about batch stem collisions ----
+    if is_batch and args.output:
+        from collections import Counter
+        _stems = Counter(Path(f).stem for f in audio_files)
+        _dupes = {s: c for s, c in _stems.items() if c > 1}
+        if _dupes and not args.quiet:
+            _dup_names = ", ".join(f"{s} ({c}×)" for s, c in _dupes.items())
+            print(f"⚠️  Batch stem collision: {_dup_names} — later files will overwrite earlier ones. "
+                  f"Use --output-template '{{stem}}_{{lang}}.{{ext}}' to differentiate.", file=sys.stderr)
+
     # ---- Load model ----
     try:
         model_kwargs = dict(device=device, compute_type=compute_type)
@@ -1403,8 +1289,12 @@ def main():
         model = WhisperModel(args.model, **model_kwargs)
         pipe = BatchedInferencePipeline(model) if use_batched else model
     except Exception as e:
+        err_msg = str(e).lower()
+        if "out of memory" in err_msg or "oom" in err_msg or "cuda" in err_msg:
+            print(f"Error: GPU memory error loading model: {e}", file=sys.stderr)
+            sys.exit(EXIT_GPU_ERROR)
         print(f"Error loading model: {e}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_GENERAL)
 
     # ---- Detect language only (early exit) ----
     if args.detect_language_only:
@@ -1443,6 +1333,15 @@ def main():
             os.unlink(stdin_tmp.name)
         sys.exit(exit_code)
 
+    # ---- Resume support ----
+    progress = None
+    progress_path = None
+    if getattr(args, "resume", None):
+        progress_path = args.resume
+        progress = load_progress(progress_path)
+        if progress["completed"] and not args.quiet:
+            print(f"📋 Resuming: {len(progress['completed'])} file(s) already done", file=sys.stderr)
+
     # ---- Transcribe ----
     results = []
     failed_files = []
@@ -1452,6 +1351,12 @@ def main():
     _skip_count = [0]  # mutable counter for batch summary
 
     def _should_skip(audio_path):
+        # Skip if resume checkpoint shows this file completed
+        if progress and os.path.abspath(audio_path) in progress["completed"]:
+            if not args.quiet:
+                print(f"⏭️  Skip (resumed): {Path(audio_path).name}", file=sys.stderr)
+            _skip_count[0] += 1
+            return True
         if args.skip_existing and args.output:
             out_dir = Path(args.output)
             if out_dir.is_dir():
@@ -1555,6 +1460,10 @@ def main():
                     total_audio += r["duration"]
                     files_done += 1
                     success = True
+                    # Save progress checkpoint
+                    if progress is not None and progress_path:
+                        progress["completed"].append(os.path.abspath(audio_path))
+                        save_progress(progress_path, progress)
                     break
                 except Exception as e:
                     last_error = e
@@ -1574,8 +1483,23 @@ def main():
                 )
                 failed_files.append((audio_path, str(last_error)))
                 files_done += 1  # count failed files too for accurate ETA
+                # Save failed files to progress
+                if progress is not None and progress_path:
+                    progress["failed"].append({
+                        "path": os.path.abspath(audio_path),
+                        "error": str(last_error),
+                    })
+                    save_progress(progress_path, progress)
                 if not is_batch:
-                    sys.exit(1)
+                    err_msg = str(last_error).lower()
+                    if any(k in err_msg for k in (
+                        "format not recognised", "invalid data", "no backend",
+                        "failed to open", "not found", "bad input",
+                    )):
+                        sys.exit(EXIT_BAD_INPUT)
+                    elif "out of memory" in err_msg or "oom" in err_msg:
+                        sys.exit(EXIT_GPU_ERROR)
+                    sys.exit(EXIT_GENERAL)
 
     # Cleanup temp dirs and stdin temp file
     for td in temp_dirs:
@@ -1592,8 +1516,12 @@ def main():
             if not args.quiet:
                 print("All files already transcribed (--skip-existing)", file=sys.stderr)
             sys.exit(0)
+        if getattr(args, "resume", None):
+            if not args.quiet:
+                print("All files already transcribed (--resume)", file=sys.stderr)
+            sys.exit(0)
         print("Error: No files transcribed", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_BAD_INPUT)
 
     # ---- Write output ----
     for r in results:
@@ -1646,6 +1574,40 @@ def main():
             _formats_list = getattr(args, "_formats", [args.format])
             if "json" in _formats_list:
                 r["chapters"] = _computed_chapters  # embed in JSON output
+
+        # ---- Agent mode: compact JSON output ----
+        if getattr(args, "agent", False):
+            # Inject file_path and output_path for agent tracking
+            r["file_path"] = os.path.abspath(audio_path)
+            # Still write to files if -o is set
+            if args.output:
+                formats = getattr(args, "_formats", [args.format])
+                for fmt in formats:
+                    ext = EXT_MAP.get(fmt, ".txt").lstrip(".")
+                    output = format_result(
+                        r, fmt,
+                        max_words_per_line=args.max_words_per_line,
+                        max_chars_per_line=getattr(args, "max_chars_per_line", None),
+                    )
+                    out_path = Path(args.output)
+                    multi_fmt = len(formats) > 1
+                    if out_path.is_dir() or (is_batch and not out_path.suffix) or (multi_fmt and not out_path.suffix):
+                        out_path.mkdir(parents=True, exist_ok=True)
+                        if args.output_template:
+                            filename = args.output_template.format(
+                                stem=stem, lang=lang, ext=ext, model=model_name,
+                            )
+                            dest = out_path / filename
+                        else:
+                            dest = out_path / (stem + EXT_MAP.get(fmt, ".txt"))
+                    else:
+                        dest = out_path
+                    dest.write_text(output, encoding="utf-8")
+                    r["output_path"] = str(dest.resolve())
+            # Emit compact JSON to stdout
+            print(format_agent_json(r, "faster-whisper"))
+            _write_stats(r, args)
+            continue
 
         # ---- Transcript search mode ----
         if getattr(args, "search", None):
@@ -1771,6 +1733,8 @@ def main():
             print(f"❌ Failed: {len(failed_files)} file(s):", file=sys.stderr)
             for path, err in failed_files:
                 print(f"   • {Path(path).name}: {err}", file=sys.stderr)
+        if progress_path:
+            print(f"📋 Progress saved: {progress_path}", file=sys.stderr)
 
 
 def _write_stats(r, args):

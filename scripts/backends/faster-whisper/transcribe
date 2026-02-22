@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Wrapper: activates faster-whisper venv and runs transcribe.py
 # Auto-runs setup if venv doesn't exist
+# Auto-installs PyTorch on-demand when --diarize or --word-timestamps is used
 
 BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_PYTHON="$BACKEND_DIR/.venv/bin/python"
@@ -21,6 +22,53 @@ if [ ! -f "$VENV_PYTHON" ]; then
     else
         echo "❌ Setup script not found: $SETUP_SCRIPT" >&2
         exit 1
+    fi
+fi
+
+# Auto-install PyTorch and optional deps when needed for advanced features
+# Basic transcription uses CTranslate2 — no PyTorch required
+needs_torch=false
+needs_diarize=false
+for arg in "$@"; do
+    case "$arg" in
+        --diarize|--export-speakers) needs_torch=true; needs_diarize=true ;;
+        --word-timestamps) needs_torch=true ;;
+    esac
+done
+
+pip_cmd() {
+    if command -v uv &>/dev/null; then
+        uv pip install --python "$VENV_PYTHON" "$@"
+    else
+        "$BACKEND_DIR/.venv/bin/pip" install "$@"
+    fi
+}
+
+if $needs_torch; then
+    if ! "$VENV_PYTHON" -c "import torch" 2>/dev/null; then
+        echo "🔧 Installing PyTorch (needed for diarization/alignment)..." >&2
+        # Detect GPU
+        nvidia_smi=""
+        command -v nvidia-smi &>/dev/null && nvidia_smi="nvidia-smi"
+        [ -z "$nvidia_smi" ] && [ -f /usr/lib/wsl/lib/nvidia-smi ] && nvidia_smi="/usr/lib/wsl/lib/nvidia-smi"
+        has_gpu=false
+        [ -n "$nvidia_smi" ] && "$nvidia_smi" --query-gpu=name --format=csv,noheader &>/dev/null && has_gpu=true
+
+        if $has_gpu; then
+            pip_cmd torch torchaudio --index-url https://download.pytorch.org/whl/cu121 >&2
+        else
+            pip_cmd torch torchaudio >&2
+        fi
+        echo "✅ PyTorch installed" >&2
+    fi
+fi
+
+# Auto-install pyannote.audio for diarization if not present
+if $needs_diarize; then
+    if ! "$VENV_PYTHON" -c "import pyannote.audio" 2>/dev/null; then
+        echo "🔧 Installing pyannote.audio (needed for speaker diarization)..." >&2
+        pip_cmd pyannote.audio >&2
+        echo "✅ pyannote.audio installed" >&2
     fi
 fi
 

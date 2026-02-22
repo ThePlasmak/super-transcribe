@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from lib.speakers import apply_speaker_names, export_speakers_audio
 
 

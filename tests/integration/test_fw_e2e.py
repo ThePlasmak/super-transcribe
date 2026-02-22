@@ -53,11 +53,6 @@ class TestFwBasic:
         r = run_fw(str(TONE_WAV))
         assert r.returncode == 0
 
-    def test_stdout_or_silence_ok(self):
-        # Silence/tones may produce empty transcript — that's fine
-        r = run_fw(str(TONE_WAV))
-        assert r.returncode == 0
-
     def test_nonexistent_file_exits_3(self):
         # EXIT_BAD_INPUT = 3: file not found triggers resolve_inputs → empty list → sys.exit(3)
         r = run_fw("/no/such/file.wav")

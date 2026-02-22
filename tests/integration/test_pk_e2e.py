@@ -59,7 +59,9 @@ def _extract_json(text: str) -> dict:
     while True:
         start = clean.find("{", search_from)
         if start == -1:
-            raise ValueError(f"No valid JSON object found in output.\nstdout (first 800):\n{text[:800]}")
+            raise ValueError(
+                f"No valid JSON object found in output.\nstdout (first 800):\n{text[:800]}"
+            )
         # Walk forward tracking brace depth to find the matching '}'
         depth = 0
         end = start
@@ -153,10 +155,17 @@ class TestPkAgent:
     def test_agent_single_line_json(self):
         # AIDEV-NOTE: NeMo log noise may appear; count only lines that start with '{'.
         r = run_pk(str(TONE_WAV), "--agent")
-        json_lines = [line for line in r.stdout.strip().split("\n") if line.strip().startswith("{")]
+        json_lines = [
+            line for line in r.stdout.strip().split("\n")
+            if line.strip().startswith("{")
+        ]
         assert len(json_lines) == 1
 
     def test_agent_has_required_fields(self):
+        # AIDEV-NOTE: 'language' is safe to assert here even for silent audio because
+        # format_agent_json() always emits the key via result.get("language") — it
+        # serialises as JSON null when absent from the parakeet result dict, so the
+        # key is always present (unlike --format json which omits the key entirely).
         r = run_pk(str(TONE_WAV), "--agent")
         j = _extract_json(r.stdout)
         for field in ("text", "duration", "language", "backend", "segments", "word_count"):
@@ -177,6 +186,7 @@ class TestPkProbe:
     def test_probe_json_has_duration(self):
         r = run_router("--probe", str(TONE_WAV))
         data = json.loads(r.stdout)
+        assert "duration" in data
         assert 0.5 <= data["duration"] <= 2.0
 
 

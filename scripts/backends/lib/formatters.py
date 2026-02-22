@@ -205,8 +205,10 @@ def to_text(segments):
             lines.append("\n")
         if sp and sp != current_speaker:
             current_speaker = sp
-            lines.append(f"\n[{sp}]")
-        lines.append(seg["text"])
+            lines.append(f"\n[{sp}] ")
+        elif lines and not lines[-1].endswith(("\n", " ")):
+            lines.append(" ")
+        lines.append(seg["text"].strip())
     return "".join(lines).strip()
 
 
@@ -459,7 +461,8 @@ def to_html(result):
                 word_parts.append(f'<span class="{cls}" title="{p:.2f}">{w["word"]}</span>')
             text_html = "".join(word_parts)
         else:
-            text_html = seg.get("text", "").strip()
+            import html as _html
+            text_html = _html.escape(seg.get("text", "").strip())
 
         segs_html.append(
             f'<div class="seg">{ts}{speaker_html} <span class="text">{text_html}</span></div>'
@@ -511,6 +514,103 @@ def to_html(result):
 def to_json(result):
     """Format result as JSON."""
     return json.dumps(result, indent=2, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Agent compact JSON (for chatbot/agent integration)
+# ---------------------------------------------------------------------------
+
+def _extract_summary_hint(segments):
+    """Extract first and last meaningful sentences for agent preview.
+
+    Returns {"first": "...", "last": "..."} or None if transcript is too short.
+    """
+    if not segments:
+        return None
+
+    # Collect all non-empty segment texts
+    texts = [s["text"].strip() for s in segments if s.get("text", "").strip()]
+    if len(texts) < 2:
+        return None
+
+    first = texts[0]
+    last = texts[-1]
+
+    # Only include if transcript is long enough to warrant a hint
+    total_chars = sum(len(t) for t in texts)
+    if total_chars < 400:
+        return None
+
+    # Truncate individual hints if very long
+    if len(first) > 200:
+        first = first[:197] + "..."
+    if len(last) > 200:
+        last = last[:197] + "..."
+
+    return {"first": first, "last": last}
+
+
+def _compute_avg_confidence(segments):
+    """Compute average word confidence across all segments.
+
+    Returns float 0.0-1.0 or None if no confidence data available.
+    """
+    confidences = []
+    for seg in segments:
+        # Check segment-level confidence
+        if "avg_logprob" in seg:
+            # Convert log probability to rough confidence (0-1)
+            import math
+            confidences.append(math.exp(seg["avg_logprob"]))
+        # Check word-level confidence
+        for word in seg.get("words", []):
+            if "probability" in word:
+                confidences.append(word["probability"])
+            elif "confidence" in word:
+                confidences.append(word["confidence"])
+    if not confidences:
+        return None
+    return round(sum(confidences) / len(confidences), 4)
+
+
+def format_agent_json(result, backend_name):
+    """Format a result as compact single-line JSON for agent consumption.
+
+    Returns fields an agent needs to reply to a user:
+    text, duration, language, processing stats, speaker info,
+    confidence, file paths, and summary hint for long transcripts.
+    """
+    segments = result.get("segments", [])
+
+    agent_data = {
+        "text": result.get("text", ""),
+        "duration": round(result.get("duration", 0), 2),
+        "language": result.get("language"),
+        "language_probability": round(result.get("language_probability", 0), 4),
+        "processing_time": result.get("stats", {}).get("processing_time", 0),
+        "backend": backend_name,
+        "segments": len(segments),
+        "speakers": result.get("speakers"),
+        "word_count": sum(len(s["text"].split()) for s in segments),
+    }
+
+    # Feature 6: avg_confidence
+    avg_conf = _compute_avg_confidence(segments)
+    if avg_conf is not None:
+        agent_data["avg_confidence"] = avg_conf
+
+    # Feature 6: file_path and output_path (echo back for multi-file tracking)
+    if result.get("file_path"):
+        agent_data["file_path"] = result["file_path"]
+    if result.get("output_path"):
+        agent_data["output_path"] = result["output_path"]
+
+    # Feature 8: summary_hint for long transcripts
+    hint = _extract_summary_hint(segments)
+    if hint:
+        agent_data["summary_hint"] = hint
+
+    return json.dumps(agent_data, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------

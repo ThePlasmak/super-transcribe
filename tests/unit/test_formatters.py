@@ -12,6 +12,7 @@ from lib.formatters import (
     format_ts_ttml,
     format_ts_vtt,
     split_words_by_chars,
+    to_ass,
     to_csv,
     to_html,
     to_json,
@@ -19,6 +20,7 @@ from lib.formatters import (
     to_srt,
     to_text,
     to_tsv,
+    to_ttml,
     to_vtt,
 )
 
@@ -280,6 +282,116 @@ class TestToLrc:
 
     def test_two_lines_for_two_segs(self, two_segs):
         assert len(to_lrc(two_segs).split("\n")) == 2
+
+
+# ── to_ass ────────────────────────────────────────────────────────────────────
+
+class TestToAss:
+    def test_script_info_header(self, two_segs):
+        ass = to_ass(two_segs)
+        assert "[Script Info]" in ass
+
+    def test_events_section_present(self, two_segs):
+        ass = to_ass(two_segs)
+        assert "[Events]" in ass
+
+    def test_dialogue_lines_present(self, two_segs):
+        ass = to_ass(two_segs)
+        assert ass.count("Dialogue:") == 2
+
+    def test_ass_timestamp_format(self, two_segs):
+        # ASS timestamps use H:MM:SS.cc (centiseconds, single-digit hour)
+        ass = to_ass(two_segs)
+        assert "0:00:00.00" in ass
+
+    def test_text_content_present(self, two_segs):
+        ass = to_ass(two_segs)
+        assert "Hello world." in ass
+
+    def test_speaker_label_included(self, speaker_segs):
+        ass = to_ass(speaker_segs)
+        assert "[SPEAKER_1]" in ass
+
+    def test_empty_segments(self):
+        # Only header lines, no Dialogue entries
+        ass = to_ass([])
+        assert "Dialogue:" not in ass
+        assert "[Script Info]" in ass
+
+    def test_max_words_per_line_splits_dialogue(self):
+        segs = [{
+            "start": 0.0, "end": 2.0, "text": " One two three four.",
+            "words": [
+                {"word": " One", "start": 0.0, "end": 0.4},
+                {"word": " two", "start": 0.4, "end": 0.8},
+                {"word": " three", "start": 0.8, "end": 1.2},
+                {"word": " four.", "start": 1.2, "end": 2.0},
+            ],
+        }]
+        ass = to_ass(segs, max_words_per_line=2)
+        assert ass.count("Dialogue:") == 2
+
+
+# ── to_ttml ───────────────────────────────────────────────────────────────────
+
+class TestToTtml:
+    def test_xml_declaration(self, two_segs):
+        ttml = to_ttml(two_segs)
+        assert ttml.startswith('<?xml version="1.0"')
+
+    def test_tt_root_element(self, two_segs):
+        ttml = to_ttml(two_segs)
+        assert "<tt " in ttml
+
+    def test_body_and_div_present(self, two_segs):
+        ttml = to_ttml(two_segs)
+        assert "<body>" in ttml
+        assert "<div " in ttml
+
+    def test_p_elements_for_segments(self, two_segs):
+        ttml = to_ttml(two_segs)
+        assert ttml.count("<p ") == 2
+
+    def test_ttml_timestamp_format(self, two_segs):
+        # TTML timestamps use HH:MM:SS.mmm with dot separator
+        ttml = to_ttml(two_segs)
+        assert 'begin="00:00:00.000"' in ttml
+
+    def test_text_content_present(self, two_segs):
+        ttml = to_ttml(two_segs)
+        assert "Hello world." in ttml
+
+    def test_speaker_label_included(self, speaker_segs):
+        ttml = to_ttml(speaker_segs)
+        assert "[SPEAKER_1]" in ttml
+
+    def test_language_attribute(self, two_segs):
+        ttml = to_ttml(two_segs, language="fr")
+        assert 'xml:lang="fr"' in ttml
+
+    def test_language_underscore_converted_to_hyphen(self, two_segs):
+        ttml = to_ttml(two_segs, language="en_US")
+        assert 'xml:lang="en-US"' in ttml
+
+    def test_xml_escaping_in_text(self):
+        segs = [{"start": 0.0, "end": 1.0, "text": "<b>Hello & World</b>"}]
+        ttml = to_ttml(segs)
+        assert "<b>Hello & World</b>" not in ttml
+        assert "&lt;b&gt;" in ttml
+        assert "&amp;" in ttml
+
+    def test_max_words_per_line_splits_p_elements(self):
+        segs = [{
+            "start": 0.0, "end": 2.0, "text": " One two three four.",
+            "words": [
+                {"word": " One", "start": 0.0, "end": 0.4},
+                {"word": " two", "start": 0.4, "end": 0.8},
+                {"word": " three", "start": 0.8, "end": 1.2},
+                {"word": " four.", "start": 1.2, "end": 2.0},
+            ],
+        }]
+        ttml = to_ttml(segs, max_words_per_line=2)
+        assert ttml.count("<p ") == 2
 
 
 # ── to_html ───────────────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ so the entire directory tree must be replicated under tmp_path.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -154,7 +155,6 @@ class TestVersion:
         """--version output must contain a semver-like string."""
         result = run(router_env, "--version")
         # E.g. "super-transcribe 0.1.0"
-        import re
         assert re.search(r"\d+\.\d+\.\d+", result.stdout), (
             f"No semver found in: {result.stdout!r}"
         )
@@ -181,7 +181,7 @@ class TestBackendsList:
         # Parakeet is bundled (dir exists) but not yet set up
         assert "parakeet" in result.stdout
 
-    def test_no_backends_ready(self, router_env_no_backends: Path) -> Path:
+    def test_no_backends_ready(self, router_env_no_backends: Path) -> None:
         """When neither is ready, --backends still exits 0 (informational)."""
         result = run(router_env_no_backends, "--backends")
         assert result.returncode == 0
@@ -560,6 +560,7 @@ class TestCheckHealth:
         data = _extract_json_from_output(result.stdout)
         assert "ready" in data
         assert "backends" in data
+        assert "action" in data
 
     def test_check_json_ready_true_when_backends_ready(self, router_env: Path) -> None:
         """--check --json must return ready=true when a backend is installed."""
@@ -585,3 +586,13 @@ class TestCheckHealth:
         assert result.returncode == 2
         data = _extract_json_from_output(result.stdout)
         assert data["ready"] is False
+
+
+# ── Test: --setup ──────────────────────────────────────────────────────────────
+
+
+class TestSetup:
+    def test_setup_without_value_exits_nonzero(self, router_env: Path) -> None:
+        """--setup without a value must exit nonzero (die() exits 1)."""
+        r = run(router_env, "--setup")
+        assert r.returncode != 0

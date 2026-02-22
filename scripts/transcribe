@@ -14,7 +14,7 @@ PK_TRANSCRIBE="$PK_DIR/transcribe"
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
-die()  { echo "❌ $*" >&2; exit 1; }
+die()  { echo "❌ $1" >&2; exit "${2:-1}"; }
 info() { echo "🎙️ $*" >&2; }
 
 backend_available() {
@@ -42,7 +42,488 @@ run_backend() {
     esac
 }
 
+# ── Estimated download sizes (for agent guidance) ─────────────────────
+
+estimated_install_json() {
+    # Returns JSON object with estimated download sizes for a backend
+    local backend="$1"
+    case "$backend" in
+        parakeet)
+            # PyTorch CUDA (~2.5GB) + nvidia/triton (~3.9GB) + NeMo [asr-only] + deps (~600MB)
+            # Model downloads on first transcription: ~1.2GB (cached permanently)
+            echo '{"backend":"parakeet","install_mb":5000,"model_first_use_mb":1200,"total_mb":6200,"note":"PyTorch+CUDA+NeMo (~5GB setup). Model (~1.2GB) downloads on first transcription."}'
+            ;;
+        faster-whisper)
+            # CTranslate2 + faster-whisper (~300MB, no PyTorch)
+            # Model downloads on first transcription: ~756MB (cached permanently)
+            echo '{"backend":"faster-whisper","install_mb":300,"model_first_use_mb":756,"total_mb":1056,"note":"Lean install (~300MB, no PyTorch). Model (~756MB) on first transcription. PyTorch (~2.8GB) deferred until --diarize."}'
+            ;;
+        *)
+            echo '{"backend":"unknown","install_mb":0,"model_first_use_mb":0,"total_mb":0,"note":"Unknown backend"}'
+            ;;
+    esac
+}
+
+# ── Health check ───────────────────────────────────────────────────────
+
+quickstart() {
+    local json_mode=false
+    local install_all=false
+    local dry_run=false
+    for _qs_arg in "$@"; do
+        case "$_qs_arg" in
+            --json) json_mode=true ;;
+            --all) install_all=true ;;
+            --dry-run) dry_run=true ;;
+        esac
+    done
+    local installed_something=false
+    local errors=()
+
+    # ── Step 1: Check Python ──
+    if ! command -v python3 &>/dev/null; then
+        if $json_mode; then
+            echo '{"ok":false,"error":"Python 3 not found. Install python3 (3.10+) first.","step":"python"}'
+        else
+            echo "❌ Python 3 not found."
+            echo ""
+            echo "  Install Python 3.10+ first:"
+            if [ "$(uname -s)" = "Darwin" ]; then
+                echo "    brew install python@3.12"
+            else
+                echo "    Ubuntu/Debian: sudo apt install python3 python3-venv"
+                echo "    Fedora:        sudo dnf install python3"
+            fi
+        fi
+        exit 2
+    fi
+    local py_ver py_major py_minor
+    py_ver=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")')
+    py_major=$(python3 -c 'import sys; print(sys.version_info.major)')
+    py_minor=$(python3 -c 'import sys; print(sys.version_info.minor)')
+    if [ "$py_major" -lt 3 ] || [ "$py_minor" -lt 10 ]; then
+        if $json_mode; then
+            echo '{"ok":false,"error":"Python '"$py_ver"' is too old. Need 3.10+.","step":"python"}'
+        else
+            echo "❌ Python $py_ver is too old — need 3.10+"
+        fi
+        exit 2
+    fi
+    $json_mode || echo "✅ Python $py_ver"
+
+    # ── Step 2: Install uv (fast package manager) if missing ──
+    if ! command -v uv &>/dev/null; then
+        $json_mode || echo "📦 Installing uv (fast package manager)..."
+        if curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null; then
+            # Source the env update so uv is available in this session
+            export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+            if command -v uv &>/dev/null; then
+                $json_mode || echo "  ✅ uv installed"
+                installed_something=true
+            else
+                $json_mode || echo "  ⚠️  uv install completed but not found in PATH"
+            fi
+        else
+            $json_mode || echo "  ⚠️  Could not install uv — will use pip (slower)"
+        fi
+    else
+        $json_mode || echo "✅ uv found"
+    fi
+
+    # ── Step 3: Check ffmpeg ──
+    # Report only — never auto-install system packages.
+    # ffmpeg is optional: only needed for non-WAV input (mp3/m4a/mp4/ogg).
+    # Status is reported via the "ffmpeg" field in JSON output.
+    if ! command -v ffmpeg &>/dev/null; then
+        $json_mode || echo "ℹ️  ffmpeg not found (optional — needed for mp3/m4a/mp4 input)"
+        $json_mode || echo "   Install if needed: sudo apt install ffmpeg (Linux) or brew install ffmpeg (macOS)"
+    else
+        $json_mode || echo "✅ ffmpeg found"
+    fi
+
+    # ── Step 4: Check GPU ──
+    local has_cuda=false gpu_name=""
+    local nvidia_smi=""
+    if command -v nvidia-smi &>/dev/null; then
+        nvidia_smi="nvidia-smi"
+    else
+        for wsl_smi in /usr/lib/wsl/lib/nvidia-smi /usr/lib/wsl/drivers/*/nvidia-smi; do
+            [ -f "$wsl_smi" ] && nvidia_smi="$wsl_smi" && break
+        done
+    fi
+    local gpu_vram_mb=0
+    if [ -n "$nvidia_smi" ]; then
+        gpu_name=$("$nvidia_smi" --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+        [ -n "$gpu_name" ] && has_cuda=true
+        # Get VRAM in MiB (nounits gives raw number)
+        gpu_vram_mb=$("$nvidia_smi" --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+        gpu_vram_mb=${gpu_vram_mb:-0}
+    fi
+    if $has_cuda; then
+        $json_mode || echo "✅ GPU: $gpu_name (${gpu_vram_mb} MiB VRAM)"
+    else
+        $json_mode || echo "ℹ️  No NVIDIA GPU — will use CPU (slower, but functional)"
+    fi
+
+    # ── Step 5: Install the best backend for this system ──
+    # Strategy: install ONE backend (the best for the hardware) unless --all is passed.
+    # GPU → Parakeet (best accuracy + speed). CPU/macOS → faster-whisper (wider compat).
+    # The second backend lazy-installs on first use if the user needs its features
+    # (e.g. translation, non-EU languages).
+    local fw_ready=false pk_ready=false
+    local primary_backend="" secondary_backend=""
+    backend_ready "faster-whisper" && fw_ready=true
+    backend_ready "parakeet" && pk_ready=true
+
+    # Decide which backend is primary for this hardware
+    if $has_cuda && backend_available "parakeet"; then
+        primary_backend="parakeet"
+        secondary_backend="faster-whisper"
+    else
+        primary_backend="faster-whisper"
+        secondary_backend="parakeet"
+    fi
+
+    local primary_ready=false secondary_ready=false
+    [ "$primary_backend" = "parakeet" ] && { $pk_ready && primary_ready=true; }
+    [ "$primary_backend" = "faster-whisper" ] && { $fw_ready && primary_ready=true; }
+    [ "$secondary_backend" = "parakeet" ] && { $pk_ready && secondary_ready=true; }
+    [ "$secondary_backend" = "faster-whisper" ] && { $fw_ready && secondary_ready=true; }
+
+    # ── Dry-run mode: report what would happen, don't install ──
+    if $dry_run; then
+        local est_json
+        local would_install=()
+        if ! $primary_ready; then
+            would_install+=("$primary_backend")
+            est_json=$(estimated_install_json "$primary_backend")
+        fi
+        if $install_all && ! $secondary_ready && backend_available "$secondary_backend"; then
+            would_install+=("$secondary_backend")
+        fi
+        if $json_mode; then
+            local install_list_json="[]"
+            if [ ${#would_install[@]} -gt 0 ]; then
+                install_list_json=$(printf '%s\n' "${would_install[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
+            fi
+            cat <<DRYJSON
+{"ok":true,"dry_run":true,"already_ready":$(if [ ${#would_install[@]} -eq 0 ]; then echo 'true'; else echo 'false'; fi),"python":"$py_ver","gpu":$(if $has_cuda; then echo '{"name":"'"$gpu_name"'","vram_mb":'"$gpu_vram_mb"'}'; else echo 'null'; fi),"ffmpeg":$(command -v ffmpeg &>/dev/null && echo 'true' || echo 'false'),"backends":{"faster_whisper":$fw_ready,"parakeet":$pk_ready},"primary_backend":"$primary_backend","would_install":$install_list_json,"estimated":$(if [ ${#would_install[@]} -gt 0 ]; then echo "$est_json"; else echo 'null'; fi),"note":$(if [ ${#would_install[@]} -eq 0 ]; then echo '"Already set up — nothing to install."'; else echo '"Run without --dry-run to install."'; fi)}
+DRYJSON
+        else
+            echo ""
+            if [ ${#would_install[@]} -eq 0 ]; then
+                echo "✅ Already set up — nothing to install."
+            else
+                echo "Would install: ${would_install[*]}"
+                echo ""
+                estimated_install_json "$primary_backend" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(f\"  Download: ~{d['install_mb']}MB (setup) + ~{d['model_first_use_mb']}MB (model on first use)\")
+print(f\"  {d['note']}\")
+"
+                echo ""
+                echo "Run without --dry-run to install."
+            fi
+        fi
+        exit 0
+    fi
+
+    if $primary_ready && ($secondary_ready || ! $install_all); then
+        $json_mode || echo "✅ Backend(s) already installed"
+    else
+        $json_mode || echo "📦 Installing transcription backend..."
+
+        # Always install primary if needed
+        if ! $primary_ready; then
+            local pk_label="Parakeet (best accuracy + speed with GPU)"
+            local fw_label="faster-whisper (99+ languages, translation, works on CPU)"
+            local label=""
+            [ "$primary_backend" = "parakeet" ] && label="$pk_label" || label="$fw_label"
+            $json_mode || echo "  Setting up $primary_backend — $label..."
+            local setup_dir=""
+            [ "$primary_backend" = "parakeet" ] && setup_dir="$PK_DIR" || setup_dir="$FW_DIR"
+            if bash "$setup_dir/setup.sh" 2>&1 | { $json_mode && cat >/dev/null || cat; }; then
+                installed_something=true
+                [ "$primary_backend" = "parakeet" ] && pk_ready=true || fw_ready=true
+                primary_ready=true
+                $json_mode || echo "  ✅ $primary_backend installed"
+            else
+                errors+=("$primary_backend setup failed")
+                $json_mode || echo "  ❌ $primary_backend setup failed"
+            fi
+        fi
+
+        # Install secondary only if --all was passed
+        if $install_all && ! $secondary_ready && backend_available "$secondary_backend"; then
+            $json_mode || echo "  Setting up $secondary_backend..."
+            local setup_dir2=""
+            [ "$secondary_backend" = "parakeet" ] && setup_dir2="$PK_DIR" || setup_dir2="$FW_DIR"
+            if bash "$setup_dir2/setup.sh" 2>&1 | { $json_mode && cat >/dev/null || cat; }; then
+                installed_something=true
+                [ "$secondary_backend" = "parakeet" ] && pk_ready=true || fw_ready=true
+                secondary_ready=true
+                $json_mode || echo "  ✅ $secondary_backend installed"
+            else
+                errors+=("$secondary_backend setup failed")
+                $json_mode || echo "  ❌ $secondary_backend setup failed"
+            fi
+        fi
+    fi
+
+    # ── Step 6: Verify readiness ──
+    local ready=false
+    ($fw_ready || $pk_ready) && ready=true
+
+    if $json_mode; then
+        local err_json="[]"
+        if [ ${#errors[@]} -gt 0 ]; then
+            err_json=$(printf '%s\n' "${errors[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
+        fi
+        local est_json_qs
+        est_json_qs=$(estimated_install_json "$primary_backend")
+        cat <<ENDJSON
+{"ok":$ready,"installed_something":$installed_something,"python":"$py_ver","gpu":$(if $has_cuda; then echo '{"name":"'"$gpu_name"'","vram_mb":'"$gpu_vram_mb"'}'; else echo 'null'; fi),"ffmpeg":$(command -v ffmpeg &>/dev/null && echo 'true' || echo 'false'),"backends":{"faster_whisper":$fw_ready,"parakeet":$pk_ready},"primary_backend":"$primary_backend","estimated":$est_json_qs,"errors":$err_json,"next_step":$(if $ready; then echo '"Ready to transcribe. Run: scripts/transcribe <audio_file>"'; else echo '"Fix the errors above and re-run --quickstart --json"'; fi),"note":$(if $ready && ! $install_all && ! $secondary_ready; then echo '"Only '"$primary_backend"' was installed (best for your hardware). The other backend will auto-install if you use a feature that needs it (e.g. translation, non-EU languages). Pass --quickstart --all to install both now."'; else echo 'null'; fi)}
+ENDJSON
+    else
+        echo ""
+        if $ready; then
+            echo "🎉 Ready to transcribe!"
+            echo ""
+            echo "  Quick start:"
+            echo "    $SCRIPT_DIR/transcribe audio.mp3"
+            if $fw_ready && $pk_ready; then
+                echo ""
+                echo "  Backends: Parakeet (best accuracy) + faster-whisper (translation/99+ languages)"
+            elif $pk_ready; then
+                echo ""
+                echo "  Backend: Parakeet (best accuracy with GPU)"
+                echo "  ℹ️  faster-whisper will auto-install if you need translation or 99+ languages"
+            else
+                echo ""
+                echo "  Backend: faster-whisper (lean install — PyTorch deferred until --diarize)"
+                if $has_cuda; then
+                    echo "  ℹ️  Parakeet will auto-install if you need maximum accuracy"
+                fi
+            fi
+            echo ""
+            echo "  First transcription downloads the model (~1-2 GB, one-time)."
+            if ! $install_all && ! $secondary_ready; then
+                echo ""
+                echo "  Want both backends now? Run: $SCRIPT_DIR/transcribe --quickstart --all"
+            fi
+        else
+            echo "❌ Setup incomplete — no backends could be installed."
+            echo ""
+            for e in "${errors[@]}"; do
+                echo "  • $e"
+            done
+        fi
+    fi
+
+    if $ready; then exit 0; else exit 2; fi
+}
+
+check_health() {
+    local json_mode=false
+    [ "${1:-}" = "--json" ] && json_mode=true
+
+    local py_ok=false py_ver="" gpu_ok=false gpu_name="" gpu_mem=""
+    local ffmpeg_ok=false ff_ver="" ytdlp_ok=false yt_ver=""
+    local hf_ok=false uv_ok=false
+    local fw_avail=false fw_ready=false fw_ver="" fw_diar=false
+    local pk_avail=false pk_ready=false pk_ver=""
+    local ready=false issues=()
+
+    # Python
+    if command -v python3 &>/dev/null; then
+        py_ver=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")')
+        local py_major py_minor
+        py_major=$(python3 -c 'import sys; print(sys.version_info.major)')
+        py_minor=$(python3 -c 'import sys; print(sys.version_info.minor)')
+        if [ "$py_major" -ge 3 ] && [ "$py_minor" -ge 10 ]; then
+            py_ok=true
+        else
+            issues+=("Python $py_ver is too old — need 3.10+")
+        fi
+    else
+        issues+=("Python 3 not found — install python3 (3.10+)")
+    fi
+
+    # GPU
+    local nvidia_smi=""
+    if command -v nvidia-smi &>/dev/null; then
+        nvidia_smi="nvidia-smi"
+    else
+        for wsl_smi in /usr/lib/wsl/lib/nvidia-smi /usr/lib/wsl/drivers/*/nvidia-smi; do
+            [ -f "$wsl_smi" ] && nvidia_smi="$wsl_smi" && break
+        done
+    fi
+    if [ -n "$nvidia_smi" ]; then
+        gpu_name=$("$nvidia_smi" --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+        if [ -n "$gpu_name" ]; then
+            gpu_ok=true
+            gpu_mem=$("$nvidia_smi" --query-gpu=memory.total --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')
+        fi
+    fi
+
+    # ffmpeg
+    if command -v ffmpeg &>/dev/null; then
+        ffmpeg_ok=true
+        ff_ver=$(ffmpeg -version 2>&1 | head -1 | awk '{print $3}')
+    fi
+
+    # yt-dlp
+    local ytdlp_path=""
+    if command -v yt-dlp &>/dev/null; then
+        ytdlp_path="yt-dlp"
+    elif [ -f "$HOME/.local/share/pipx/venvs/yt-dlp/bin/yt-dlp" ]; then
+        ytdlp_path="$HOME/.local/share/pipx/venvs/yt-dlp/bin/yt-dlp"
+    fi
+    if [ -n "$ytdlp_path" ]; then
+        ytdlp_ok=true
+        yt_ver=$("$ytdlp_path" --version 2>/dev/null || echo "unknown")
+    fi
+
+    # HuggingFace token
+    [ -f "$HOME/.cache/huggingface/token" ] && hf_ok=true
+
+    # uv
+    command -v uv &>/dev/null && uv_ok=true
+
+    # Backends
+    backend_available "faster-whisper" && fw_avail=true
+    backend_available "parakeet" && pk_avail=true
+    local fw_torch=false
+    if backend_ready "faster-whisper"; then
+        fw_ready=true
+        fw_ver=$("$FW_DIR/.venv/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('faster-whisper'))" 2>/dev/null || echo "unknown")
+        "$FW_DIR/.venv/bin/python" -c "import torch" 2>/dev/null && fw_torch=true
+        "$FW_DIR/.venv/bin/python" -c "import pyannote.audio" 2>/dev/null && fw_diar=true
+    fi
+    if backend_ready "parakeet"; then
+        pk_ready=true
+        pk_ver=$("$PK_DIR/venv/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('nemo_toolkit'))" 2>/dev/null || echo "unknown")
+    fi
+
+    # Overall readiness
+    if $py_ok && ($fw_ready || $pk_ready); then
+        ready=true
+    fi
+
+    if $json_mode; then
+        # Determine action hint for agents
+        local action="ready"
+        local setup_hint=""
+        if ! $py_ok; then
+            action="install_python"
+            setup_hint="Install Python 3.10+: sudo apt install python3 python3-venv (Linux) or brew install python@3.12 (macOS). Then re-run --check --json."
+        elif ! $fw_ready && ! $pk_ready; then
+            action="run_quickstart"
+            setup_hint="Run: scripts/transcribe --quickstart --dry-run --json to preview install size, then --quickstart --json to install."
+        fi
+        # Build missing_optional list for agent convenience
+        local missing_opt=()
+        $ffmpeg_ok  || missing_opt+=("ffmpeg (needed for mp3/m4a/mp4 input)")
+        $ytdlp_ok   || missing_opt+=("yt-dlp (needed for YouTube/URL downloads)")
+        $hf_ok      || missing_opt+=("huggingface token (needed for faster-whisper diarization)")
+        $uv_ok      || missing_opt+=("uv (faster package installs; pip used as fallback)")
+        $fw_torch   || { $fw_ready && missing_opt+=("pytorch (auto-installs on first --diarize or --word-timestamps use)"); }
+        $fw_diar    || { $fw_ready && $fw_torch && missing_opt+=("faster-whisper diarization (pyannote.audio — auto-installs on first --diarize use)"); }
+        local missing_json="[]"
+        if [ ${#missing_opt[@]} -gt 0 ]; then
+            missing_json=$(printf '%s\n' "${missing_opt[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
+        fi
+        # Determine recommended backend and estimate install size (for agents)
+        local rec_backend=""
+        local est_install_json="null"
+        if [ "$action" = "run_quickstart" ]; then
+            if $gpu_ok && $pk_avail; then
+                rec_backend="parakeet"
+            else
+                rec_backend="faster-whisper"
+            fi
+            est_install_json=$(estimated_install_json "$rec_backend")
+        fi
+        # Compact JSON for agent parsing
+        # Fields: ready (bool), action (what to do next), setup_hint (human-readable next step),
+        # estimated_install (size info when setup needed), missing_optional (non-blocking),
+        # python, gpu, ffmpeg, ytdlp, huggingface_token, uv, backends
+        cat <<ENDJSON
+{"ready":$ready,"action":"$action","setup_hint":"$setup_hint","estimated_install":$est_install_json,"missing_optional":$missing_json,"python":{"ok":$py_ok,"version":"$py_ver"},"gpu":{"ok":$gpu_ok,"name":"$gpu_name","memory":"$gpu_mem"},"ffmpeg":{"ok":$ffmpeg_ok,"version":"$ff_ver"},"ytdlp":{"ok":$ytdlp_ok,"version":"$yt_ver"},"huggingface_token":$hf_ok,"uv":$uv_ok,"backends":{"faster_whisper":{"bundled":$fw_avail,"installed":$fw_ready,"version":"$fw_ver","pytorch":$fw_torch,"diarization":$fw_diar},"parakeet":{"bundled":$pk_avail,"installed":$pk_ready,"version":"$pk_ver"}}}
+ENDJSON
+        if $ready; then exit 0; else exit 2; fi
+    fi
+
+    # Human-readable output
+    echo "🎙️ Super-Transcribe Health Check"
+    echo ""
+
+    echo "Prerequisites:"
+    if $py_ok; then
+        echo "  ✅ Python $py_ver"
+    else
+        echo "  ❌ Python — ${issues[0]:-not found}"
+    fi
+    if $gpu_ok; then
+        echo "  ✅ GPU: $gpu_name ($gpu_mem)"
+    else
+        echo "  ⚠️  No NVIDIA GPU — will use CPU (50-100× slower)"
+    fi
+    if $ffmpeg_ok; then
+        echo "  ✅ ffmpeg $ff_ver"
+    else
+        echo "  ⚠️  ffmpeg not found — install: sudo apt install ffmpeg"
+    fi
+    if $ytdlp_ok; then
+        echo "  ✅ yt-dlp $yt_ver"
+    else
+        echo "  ℹ️  yt-dlp not found — install: pipx install yt-dlp"
+    fi
+    if $hf_ok; then
+        echo "  ✅ HuggingFace token"
+    else
+        echo "  ℹ️  No HuggingFace token (needed for faster-whisper diarization)"
+    fi
+    echo ""
+
+    echo "Backends:"
+    if $fw_ready; then
+        local diar_status="not installed"
+        $fw_diar && diar_status="✅ pyannote"
+        echo "  ✅ faster-whisper v$fw_ver [diarize: $diar_status]"
+    elif $fw_avail; then
+        echo "  📦 faster-whisper (bundled, run --setup faster-whisper to install)"
+    else
+        echo "  ❌ faster-whisper (not bundled)"
+    fi
+    if $pk_ready; then
+        echo "  ✅ Parakeet (NeMo) v$pk_ver [diarize: built-in]"
+    elif $pk_avail; then
+        echo "  📦 Parakeet (bundled, run --setup parakeet to install)"
+    else
+        echo "  ❌ Parakeet (not bundled)"
+    fi
+    echo ""
+
+    if $ready; then
+        echo "✅ Ready to transcribe!"
+    elif $py_ok; then
+        echo "⚠️  No backends installed yet."
+        echo ""
+        echo "  Quick start:  ./scripts/transcribe --setup all"
+        echo "  Or just transcribe a file — backends auto-install on first use."
+    else
+        echo "❌ Not ready — fix the issues above first."
+    fi
+    echo ""
+
+    if $ready; then exit 0; else exit 2; fi
+}
+
 # ── Usage ──────────────────────────────────────────────────────────────
+
+SUPER_TRANSCRIBE_VERSION="0.1.0"
 
 usage() {
     cat <<'EOF'
@@ -56,10 +537,23 @@ USAGE:
     ./scripts/transcribe --backend <name> [OPTIONS] AUDIO [AUDIO...]
 
 ROUTING OPTIONS (super-transcribe only):
+    --quickstart         Auto-install the best backend for your hardware (lean install)
+    --quickstart --all   Install both backends (Parakeet + faster-whisper)
+    --quickstart --json  Same, with structured JSON output for agents
+    --quickstart --dry-run --json  Preview what would be installed with estimated sizes
+    --check              Check prerequisites and backend status (exit 0=ready, 2=not ready)
+    --check --json       Same check, compact JSON output for agents
     --backend <name>     Force a backend: faster-whisper | parakeet
     --backends           List available/installed backends and exit
+    --probe              Quick audio metadata (duration, format, channels) — no transcription
+    --help-models        Show all available models with aliases, sizes, and use cases
     --help-routing       Show auto-routing logic and exit
     --setup <name>       Pre-install a backend without transcribing
+                         Add --diarize to include speaker diarization deps
+    --fast               Use small 110M Parakeet model (quick, lower accuracy)
+    --multitalker        Multi-speaker pipeline with overlapped speech handling
+    --resume <path>      Resume batch processing from checkpoint file
+    --version            Show super-transcribe + backend versions
 
 All other options are passed through to the selected backend.
 Run with --backend <name> --help to see backend-specific options.
@@ -76,14 +570,23 @@ AUTO-ROUTING:
     output formats, preprocessing, burn-in, RSS) work on BOTH backends.
 
 EXAMPLES:
+    ./scripts/transcribe --quickstart --json              # One-command setup (best backend for hardware)
+    ./scripts/transcribe --quickstart --dry-run --json   # Preview install with estimated sizes
+    ./scripts/transcribe --quickstart --all              # Install both backends
+    ./scripts/transcribe --check --json                  # Verify setup with estimated sizes
     ./scripts/transcribe audio.mp3                       # Auto-route
+    ./scripts/transcribe --probe audio.mp3               # Quick metadata check
     ./scripts/transcribe --backend parakeet lecture.wav   # Force Parakeet
     ./scripts/transcribe audio.mp3 --diarize             # Either backend
     ./scripts/transcribe audio.mp3 --translate            # Auto → faster-whisper
     ./scripts/transcribe audio.mp3 --format ass -o s.ass  # Either backend
+    ./scripts/transcribe --fast audio.mp3                 # Quick 110M model
+    ./scripts/transcribe --multitalker meeting.wav        # Multi-speaker pipeline
+    ./scripts/transcribe *.mp3 --resume prog.json        # Resume batch
     ./scripts/transcribe --backends                       # Show what's installed
     ./scripts/transcribe --setup faster-whisper           # Pre-install backend
-    ./scripts/transcribe --setup parakeet                 # Pre-install backend
+    ./scripts/transcribe --setup all                      # Pre-install both backends
+    ./scripts/transcribe --setup all --diarize            # Full install with diarization
 EOF
     exit 0
 }
@@ -94,7 +597,20 @@ show_backends() {
     for b in faster-whisper parakeet; do
         if backend_available "$b"; then
             if backend_ready "$b"; then
-                echo "  ✅ $b  (installed & ready)"
+                local diar_info=""
+                case "$b" in
+                    faster-whisper)
+                        if "$FW_DIR/.venv/bin/python" -c "import pyannote.audio" 2>/dev/null; then
+                            diar_info=" [diarize: ✅ pyannote]"
+                        else
+                            diar_info=" [diarize: auto-installs on first use]"
+                        fi
+                        ;;
+                    parakeet)
+                        diar_info=" [diarize: ✅ NeMo built-in]"
+                        ;;
+                esac
+                echo "  ✅ $b  (installed & ready)${diar_info}"
             else
                 echo "  📦 $b  (bundled, not yet set up — will auto-setup on first use)"
             fi
@@ -104,13 +620,14 @@ show_backends() {
     done
     echo ""
     echo "To pre-install a backend:  ./scripts/transcribe --setup <name>"
+    echo "Full install with diarization: ./scripts/transcribe --setup all --diarize"
     echo ""
     exit 0
 }
 
 setup_backend() {
     local name="$1"
-    local dir setup
+    local dir setup setup_args=()
     case "$name" in
         faster-whisper|fw|whisper)
             name="faster-whisper"; dir="$FW_DIR" ;;
@@ -128,11 +645,21 @@ setup_backend() {
     setup="$dir/setup.sh"
     [ -f "$setup" ] || die "Setup script not found for $name"
 
+    # Pass through --diarize if SETUP_DIARIZE is set
+    if [ "${SETUP_DIARIZE:-false}" = "true" ]; then
+        setup_args+=(--diarize)
+    fi
+
     if backend_ready "$name"; then
-        echo "✅ $name is already set up"
+        if [ ${#setup_args[@]} -gt 0 ]; then
+            echo "🔧 $name is set up — installing optional dependencies..."
+            bash "$setup" "${setup_args[@]}"
+        else
+            echo "✅ $name is already set up"
+        fi
     else
         echo "🔧 Setting up $name..."
-        bash "$setup"
+        bash "$setup" "${setup_args[@]}"
         echo ""
         if backend_ready "$name"; then
             echo "✅ $name is ready"
@@ -140,6 +667,81 @@ setup_backend() {
             die "$name setup may have failed — check errors above"
         fi
     fi
+}
+
+show_models() {
+    cat <<'EOF'
+🎙️ Super-Transcribe — Available Models
+
+PARAKEET BACKEND (NeMo) — High accuracy, auto-punctuation, timestamps
+══════════════════════════════════════════════════════════════════════
+
+  ASR Models:
+    parakeet-tdt-0.6b-v3  [DEFAULT]  600M params, ~2GB VRAM
+      Aliases: v3, tdt-v3, tdt-0.6b-v3
+      25 EU languages (auto-detected), best accuracy (6.34% avg WER)
+
+    parakeet-tdt-0.6b-v2             600M params, ~2GB VRAM
+      Aliases: v2, tdt-v2, tdt-0.6b-v2
+      English only
+
+    parakeet-tdt-1.1b                1.1B params, ~4GB VRAM
+      Aliases: 1.1b, tdt-1.1b
+      English only, higher accuracy for English
+
+    parakeet-tdt_ctc-110m            110M params, ~1GB VRAM
+      Aliases: fast, small, 110m
+      English only, fastest inference (use with --fast)
+
+  ASR + Translation (Canary):
+    canary-1b-v2                     1B params, ~3GB VRAM
+      Aliases: canary, canary-v2
+      25 EU languages, ASR + translation (any ↔ any within supported langs)
+      Use with: --translate --source-lang fr --target-lang en
+
+    canary-1b-flash                  883M params, ~2.5GB VRAM
+      Aliases: canary-flash
+      4 languages (EN/DE/FR/ES), >1000× RTF — fastest Canary variant
+      Use with: --translate --source-lang fr --target-lang en
+
+  Language-specific:
+    parakeet-tdt_ctc-0.6b-ja         Japanese (aliases: ja, japanese)
+    parakeet-ctc-0.6b-Vietnamese     Vietnamese (aliases: vi, vietnamese)
+    parakeet-rnnt-110m-da-dk         Danish (aliases: da, danish)
+      110M params, ~1GB VRAM, Danish only
+
+  Multitalker:
+    multitalker-parakeet-streaming-0.6b-v1  ~6GB VRAM
+      Alias: multitalker
+      Overlapped speech handling, use with --multitalker
+
+FASTER-WHISPER BACKEND (CTranslate2) — Translation, 99+ languages, prompting
+═════════════════════════════════════════════════════════════════════════════
+
+    distil-large-v3.5  [DEFAULT]     ~2GB VRAM
+      Aliases: distil-v3.5
+      99+ languages, English-optimized, fastest Whisper model
+
+    large-v3-turbo                   ~3GB VRAM
+      Aliases: turbo
+      99+ languages, good speed/accuracy balance
+
+    large-v3                         ~5GB VRAM
+      99+ languages, highest Whisper accuracy
+
+    distil-large-v3                  ~2GB VRAM
+      Previous distil generation
+
+    medium / small / tiny / base     Various sizes
+      Lower accuracy, less VRAM, faster
+
+EXPLICIT MODEL SELECTION:
+    --backend parakeet -m v3              Use Parakeet v3
+    --backend faster-whisper -m turbo     Use Whisper large-v3-turbo
+    -m nvidia/parakeet-tdt-0.6b-v3       Full HuggingFace path (any model)
+    -m canary-v2 --translate              Canary translation
+EOF
+    exit 0
 }
 
 show_routing() {
@@ -197,6 +799,9 @@ Flags that force faster-whisper (Whisper-model-specific):
 Flags that force Parakeet:
     --long-form
     --streaming (parakeet chunked inference)
+    --fast (small 110M model)
+    --multitalker (multi-speaker pipeline)
+    --source-lang, --target-lang (Canary translation)
 
 Language routing:
     Non-European languages (e.g. -l ja, -l zh, -l ar) → faster-whisper
@@ -242,7 +847,8 @@ FW_ONLY_WITHVAL=(
 )
 
 # Parakeet-only flags
-PK_ONLY_NOVAL=(--long-form --streaming)
+PK_ONLY_NOVAL=(--long-form --streaming --no-align)
+PK_ONLY_WITHVAL=(--source-lang --target-lang)
 
 # Non-European languages that require faster-whisper (Parakeet only supports 25 EU langs)
 PARAKEET_LANGS="bg hr cs da nl en et fi fr de el hu it lv lt mt pl pt ro sk sl es sv ru uk"
@@ -261,21 +867,115 @@ FORCED_BACKEND=""
 PASSTHROUGH=()
 needs_fw=false
 needs_pk=false
+AGENT_MODE=false
+PROBE_MODE=false
 
 while [ $# -gt 0 ]; do
     arg="$1"
     case "$arg" in
         --help|-h)       usage ;;
+        --check)
+            if [ "${2:-}" = "--json" ]; then
+                check_health --json
+            else
+                check_health
+            fi
+            ;;
+        --quickstart)
+            # Collect sub-flags: --json, --all (in any order after --quickstart)
+            _qs_args=()
+            shift
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --json|--all|--dry-run) _qs_args+=("$1"); shift ;;
+                    *) break ;;
+                esac
+            done
+            quickstart "${_qs_args[@]}"
+            ;;
         --backends)      show_backends ;;
+        --help-models)   show_models ;;
         --help-routing)  show_routing ;;
+
+        # ── Probe mode (quick metadata, no transcription) ──
+        --probe)
+            PROBE_MODE=true
+            shift; continue
+            ;;
+
+        # ── Version ──
+        --version)
+            echo "super-transcribe $SUPER_TRANSCRIBE_VERSION"
+            if backend_ready "faster-whisper"; then
+                fw_ver=$("$FW_DIR/.venv/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('faster-whisper'))" 2>/dev/null || echo "unknown")
+                echo "  faster-whisper: $fw_ver"
+            fi
+            if backend_ready "parakeet"; then
+                pk_ver=$("$PK_DIR/venv/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('nemo_toolkit'))" 2>/dev/null || echo "unknown")
+                echo "  nemo_toolkit: $pk_ver"
+            fi
+            exit 0
+            ;;
 
         # ── Setup command ──
         --setup)
             [ $# -ge 2 ] || die "--setup requires a value: faster-whisper | parakeet | all"
-            setup_backend "$2"; exit 0
+            _setup_target="$2"; shift 2
+            # Check remaining args for --diarize
+            for _sa in "$@"; do
+                [ "$_sa" = "--diarize" ] && SETUP_DIARIZE=true
+            done
+            setup_backend "$_setup_target"; exit 0
             ;;
         --setup=*)
-            setup_backend "${arg#--setup=}"; exit 0
+            _setup_target="${arg#--setup=}"; shift
+            for _sa in "$@"; do
+                [ "$_sa" = "--diarize" ] && SETUP_DIARIZE=true
+            done
+            setup_backend "$_setup_target"; exit 0
+            ;;
+
+        # ── Fast mode (forces parakeet + 110M model) ──
+        --fast)
+            needs_pk=true
+            PASSTHROUGH+=("$arg")
+            shift; continue
+            ;;
+
+        # ── Multitalker mode (forces parakeet) ──
+        --multitalker)
+            needs_pk=true
+            PASSTHROUGH+=("$arg")
+            shift; continue
+            ;;
+        --multitalker-diar-model|--multitalker-asr-model)
+            needs_pk=true
+            PASSTHROUGH+=("$arg")
+            if [ $# -ge 2 ] && [[ ! "$2" == -* ]]; then
+                PASSTHROUGH+=("$2"); shift
+            fi
+            shift; continue
+            ;;
+        --multitalker-diar-model=*|--multitalker-asr-model=*)
+            needs_pk=true
+            PASSTHROUGH+=("$arg")
+            shift; continue
+            ;;
+
+        # ── Resume (pass through to backend) ──
+        --resume)
+            [ $# -ge 2 ] || die "--resume requires a checkpoint file path"
+            PASSTHROUGH+=("$arg" "$2"); shift 2; continue
+            ;;
+        --resume=*)
+            PASSTHROUGH+=("$arg"); shift; continue
+            ;;
+
+        # ── Agent mode (compact JSON output, suppress stderr) ──
+        --agent)
+            AGENT_MODE=true
+            PASSTHROUGH+=("$arg")
+            shift; continue
             ;;
 
         # ── Backend selection (consume, don't pass through) ──
@@ -335,12 +1035,20 @@ while [ $# -gt 0 ]; do
             elif is_in_array "$arg" "${PK_ONLY_NOVAL[@]}"; then
                 needs_pk=true
                 PASSTHROUGH+=("$arg")
+            elif is_in_array "$arg" "${PK_ONLY_WITHVAL[@]}"; then
+                needs_pk=true
+                PASSTHROUGH+=("$arg")
+                if [ $# -ge 2 ] && [[ ! "$2" == -* ]]; then
+                    PASSTHROUGH+=("$2"); shift
+                fi
             else
-                # Check --flag=value form for fw-only flags
+                # Check --flag=value form for fw-only or pk-only flags
                 flag_part="${arg%%=*}"
                 if [ "$flag_part" != "$arg" ]; then
                     if is_in_array "$flag_part" "${FW_ONLY_WITHVAL[@]}"; then
                         needs_fw=true
+                    elif is_in_array "$flag_part" "${PK_ONLY_WITHVAL[@]}"; then
+                        needs_pk=true
                     fi
                 fi
                 PASSTHROUGH+=("$arg")
@@ -360,17 +1068,43 @@ normalize_backend() {
     esac
 }
 
+# ── Probe mode: run and exit before backend selection ─────────────
+if $PROBE_MODE; then
+    # Find audio files in passthrough args (non-flag args)
+    PROBE_FILES=()
+    for p_arg in "${PASSTHROUGH[@]}"; do
+        if [[ ! "$p_arg" == -* ]] && [ -f "$p_arg" ]; then
+            PROBE_FILES+=("$p_arg")
+        fi
+    done
+    if [ ${#PROBE_FILES[@]} -eq 0 ]; then
+        die "No audio file specified for --probe" 3
+    fi
+    # Use Python with shared lib to probe
+    PROBE_SCRIPT="
+import sys, json
+sys.path.insert(0, '$SCRIPT_DIR/backends')
+from lib.audio import probe_audio
+for f in sys.argv[1:]:
+    print(json.dumps(probe_audio(f), ensure_ascii=False))
+"
+    python3 -c "$PROBE_SCRIPT" "${PROBE_FILES[@]}"
+    exit 0
+fi
+
+# ── Resolve backend ───────────────────────────────────────────────────
+
 if [ -n "$FORCED_BACKEND" ]; then
     BACKEND=$(normalize_backend "$FORCED_BACKEND")
-    [ -n "$BACKEND" ] || die "Unknown backend '$FORCED_BACKEND'. Choose: faster-whisper | parakeet"
-    backend_available "$BACKEND" || die "Backend '$BACKEND' files are missing from $SCRIPT_DIR/backends/"
+    [ -n "$BACKEND" ] || die "Unknown backend '$FORCED_BACKEND'. Choose: faster-whisper | parakeet" 3
+    backend_available "$BACKEND" || die "Backend '$BACKEND' files are missing from $SCRIPT_DIR/backends/" 2
 elif $needs_fw && $needs_pk; then
-    die "Conflicting flags: some require faster-whisper, others require parakeet. Use --backend to pick one."
+    die "Conflicting flags: some require faster-whisper, others require parakeet. Use --backend to pick one." 3
 elif $needs_fw; then
-    backend_available "faster-whisper" || die "faster-whisper backend files are missing"
+    backend_available "faster-whisper" || die "faster-whisper backend files are missing" 2
     BACKEND="faster-whisper"
 elif $needs_pk; then
-    backend_available "parakeet" || die "parakeet backend files are missing"
+    backend_available "parakeet" || die "parakeet backend files are missing" 2
     BACKEND="parakeet"
 else
     # Default: prefer parakeet (best accuracy + speed), fall back to faster-whisper
@@ -379,9 +1113,21 @@ else
     elif backend_available "faster-whisper"; then
         BACKEND="faster-whisper"
     else
-        die "No transcription backends found in $SCRIPT_DIR/backends/"
+        die "No transcription backends found in $SCRIPT_DIR/backends/" 2
     fi
 fi
 
-info "Routing to $BACKEND"
+# ── First-run UX: notify about backend setup ─────────────────────────
+if ! backend_ready "$BACKEND"; then
+    if $AGENT_MODE; then
+        # In agent mode, emit a structured status to stderr before setup
+        echo '{"status":"setting_up","backend":"'"$BACKEND"'","message":"Setting up '"$BACKEND"' backend for the first time. This may take 1-3 minutes (downloading models and dependencies)..."}' >&2
+    else
+        info "First-time setup for $BACKEND — installing dependencies and models. This may take 1-3 minutes..."
+    fi
+fi
+
+if ! $AGENT_MODE; then
+    info "Routing to $BACKEND"
+fi
 run_backend "$BACKEND" "${PASSTHROUGH[@]}"

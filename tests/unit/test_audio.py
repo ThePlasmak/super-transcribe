@@ -307,3 +307,15 @@ class TestExtractChannel:
             path, tmp = extract_channel(str(f), "left", quiet=True)
 
         assert path == str(f) and tmp is None
+
+    def test_ffmpeg_failure_returns_original(self, tmp_path):
+        f = tmp_path / "audio.wav"
+        f.touch()
+
+        with patch("lib.audio.shutil.which", return_value="/usr/bin/ffmpeg"), \
+             patch("lib.audio.subprocess.run") as mock_run, \
+             patch("lib.audio.os.path.exists", return_value=False):
+            mock_run.side_effect = subprocess.CalledProcessError(1, "ffmpeg")
+            path, tmp = extract_channel(str(f), "left", quiet=True)
+
+        assert path == str(f) and tmp is None

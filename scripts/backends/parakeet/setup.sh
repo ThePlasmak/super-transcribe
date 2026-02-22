@@ -23,16 +23,43 @@ for arg in "$@"; do
                 echo "❌ No venv found at $VENV_DIR — run ./setup.sh first"
                 exit 1
             fi
-            echo "🔄 Upgrading NeMo toolkit..."
+            echo "🔄 Upgrading NeMo toolkit and dependencies..."
+
+            # Ensure torch >= 2.6.0 (required by NeMo 2.6+)
+            TORCH_CUR=$("$VENV_DIR/bin/python" -c "import torch; print(torch.__version__.split('+')[0])" 2>/dev/null || echo "0.0.0")
+            TORCH_NEEDS_UPGRADE=$("$VENV_DIR/bin/python" -c "
+from packaging.version import Version
+print('yes' if Version('$TORCH_CUR') < Version('2.6.0') else 'no')
+" 2>/dev/null || echo "yes")
+            if [ "$TORCH_NEEDS_UPGRADE" = "yes" ]; then
+                echo "📦 Upgrading PyTorch (NeMo 2.6+ requires torch >= 2.6.0)..."
+                HAS_CUDA_UPD=$("$VENV_DIR/bin/python" -c "import torch; print(torch.cuda.is_available())" 2>/dev/null || echo "False")
+                if [ "$HAS_CUDA_UPD" = "True" ] || [ -n "$($VENV_DIR/bin/python -c 'import torch; print(torch.version.cuda)' 2>/dev/null)" ]; then
+                    if command -v uv &> /dev/null; then
+                        uv pip install --python "$VENV_DIR/bin/python" "torch>=2.6.0" torchaudio --index-url https://download.pytorch.org/whl/cu121
+                    else
+                        "$VENV_DIR/bin/pip" install "torch>=2.6.0" torchaudio --index-url https://download.pytorch.org/whl/cu121
+                    fi
+                else
+                    if command -v uv &> /dev/null; then
+                        uv pip install --python "$VENV_DIR/bin/python" "torch>=2.6.0" torchaudio
+                    else
+                        "$VENV_DIR/bin/pip" install "torch>=2.6.0" torchaudio
+                    fi
+                fi
+            fi
+
             if command -v uv &> /dev/null; then
-                uv pip install --python "$VENV_DIR/bin/python" --upgrade "nemo_toolkit[asr]"
+                uv pip install --python "$VENV_DIR/bin/python" --upgrade "nemo_toolkit[asr-only]"
             else
-                "$VENV_DIR/bin/pip" install --upgrade "nemo_toolkit[asr]"
+                "$VENV_DIR/bin/pip" install --upgrade "nemo_toolkit[asr-only]"
             fi
             echo "✅ NeMo toolkit updated"
             "$VENV_DIR/bin/python" -c "
-import importlib.metadata
+import importlib.metadata, torch
 print(f'nemo_toolkit: {importlib.metadata.version(\"nemo_toolkit\")}')
+print(f'torch: {torch.__version__}')
+print(f'cuda: {torch.cuda.is_available()}')
 " 2>/dev/null || echo "Version check failed"
             exit 0
             ;;
@@ -91,12 +118,23 @@ print(f'nemo_toolkit: {importlib.metadata.version(\"nemo_toolkit\")}')
 
                 # CUDA in venv
                 CUDA_CHECK=$("$VENV_DIR/bin/python" -c "import torch; print(torch.cuda.is_available())" 2>/dev/null || echo "False")
+                TORCH_VER=$("$VENV_DIR/bin/python" -c "import torch; print(torch.__version__)" 2>/dev/null || echo "unknown")
+                TORCH_BASE=$(echo "$TORCH_VER" | sed 's/+.*//')
                 if [ "$CUDA_CHECK" = "True" ]; then
                     CUDA_DEV=$("$VENV_DIR/bin/python" -c "import torch; print(torch.cuda.get_device_name(0))" 2>/dev/null)
-                    TORCH_VER=$("$VENV_DIR/bin/python" -c "import torch; print(torch.__version__)" 2>/dev/null)
                     echo "✅ CUDA in venv: available ($CUDA_DEV, PyTorch $TORCH_VER)"
                 else
                     echo "⚠️  CUDA in venv: not available (CPU mode; check PyTorch CUDA install)"
+                fi
+
+                # Torch version check (NeMo 2.6+ needs torch >= 2.6.0)
+                TORCH_OK=$("$VENV_DIR/bin/python" -c "
+from packaging.version import Version
+print('ok' if Version('$TORCH_BASE') >= Version('2.6.0') else 'old')
+" 2>/dev/null || echo "unknown")
+                if [ "$TORCH_OK" = "old" ]; then
+                    echo "⚠️  PyTorch $TORCH_BASE is below 2.6.0 — NeMo 2.6+ requires torch >= 2.6.0"
+                    echo "   Run: ./setup.sh --update  or reinstall torch manually"
                 fi
 
                 # Model cache check
@@ -248,39 +286,48 @@ if ! command -v uv &> /dev/null; then
 fi
 
 # Install PyTorch with CUDA support FIRST (before NeMo, to avoid CPU-only torch)
+# NeMo 2.6+ requires torch >= 2.6.0
+MIN_TORCH_VERSION="2.6.0"
+
+needs_torch_install() {
+    local existing
+    existing=$("$VENV_DIR/bin/python" -c "import torch; print(torch.__version__.split('+')[0])" 2>/dev/null) || return 0
+    "$VENV_DIR/bin/python" -c "
+from packaging.version import Version
+import sys
+sys.exit(0 if Version('$existing') >= Version('$MIN_TORCH_VERSION') else 1)
+" 2>/dev/null && return 1 || return 0
+}
+
 if [ "$HAS_CUDA" = true ]; then
     echo ""
     echo "🚀 Installing PyTorch with CUDA support..."
+    echo "   NeMo 2.6+ requires torch >= $MIN_TORCH_VERSION."
     echo "   This enables GPU-accelerated transcription (~3380x realtime!)."
     echo ""
     if command -v uv &> /dev/null; then
-        uv pip install --python "$VENV_DIR/bin/python" torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+        uv pip install --python "$VENV_DIR/bin/python" "torch>=$MIN_TORCH_VERSION" torchaudio --index-url https://download.pytorch.org/whl/cu121
     else
-        "$VENV_DIR/bin/pip" install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+        "$VENV_DIR/bin/pip" install "torch>=$MIN_TORCH_VERSION" torchaudio --index-url https://download.pytorch.org/whl/cu121
     fi
     echo "✓ PyTorch with CUDA installed"
 else
     echo ""
     echo "Installing PyTorch (CPU)..."
-    pip_install torch torchaudio
+    pip_install "torch>=$MIN_TORCH_VERSION" torchaudio
     echo "✓ PyTorch (CPU) installed"
 fi
 
-# Install NeMo toolkit with ASR support
+# Install NeMo toolkit + omegaconf from requirements.txt
+# requirements.txt uses [asr-only] NOT [asr] — avoids ~19 training-only packages
+# (wandb, transformers, datasets, lightning, pandas, peft, etc.)
+# Savings: ~400MB fewer packages than [asr]
 echo ""
-echo "📦 Installing NeMo toolkit (ASR)..."
+echo "📦 Installing NeMo toolkit (ASR inference)..."
 echo "   This may take a few minutes..."
 echo ""
-pip_install "nemo_toolkit[asr]"
+pip_install -r "$SCRIPT_DIR/requirements.txt"
 echo "✓ NeMo toolkit installed"
-
-# Install soundfile for audio info
-pip_install soundfile
-echo "✓ soundfile installed"
-
-# Install PyYAML + OmegaConf (needed for NeMo diarization config)
-pip_install pyyaml omegaconf
-echo "✓ yaml/omegaconf installed"
 
 # Install diarization dependencies if requested
 if [ "$INSTALL_DIARIZE" = true ]; then

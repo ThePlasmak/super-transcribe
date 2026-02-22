@@ -4,6 +4,8 @@ Shared RSS feed parsing for super-transcribe backends.
 
 import sys
 
+from .exitcodes import EXIT_BAD_INPUT
+
 
 def fetch_rss_episodes(rss_url, latest=5, quiet=False):
     """Parse a podcast RSS feed and return audio enclosure URLs.
@@ -23,18 +25,18 @@ def fetch_rss_episodes(rss_url, latest=5, quiet=False):
             xml_data = resp.read()
     except Exception as e:
         print(f"Error fetching RSS feed: {e}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_BAD_INPUT)
 
     try:
         root = ET.fromstring(xml_data)
     except ET.ParseError as e:
         print(f"Error parsing RSS XML: {e}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_BAD_INPUT)
 
     items = root.findall(".//item")
     if not items:
         print("Error: No <item> elements found in RSS feed", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_BAD_INPUT)
 
     episodes = []
     for item in items:
@@ -50,7 +52,7 @@ def fetch_rss_episodes(rss_url, latest=5, quiet=False):
 
     if not episodes:
         print("Error: No audio <enclosure> elements found in RSS feed", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_BAD_INPUT)
 
     total = len(episodes)
     take = min(latest, total) if latest else total

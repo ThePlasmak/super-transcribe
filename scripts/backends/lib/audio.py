@@ -1,14 +1,76 @@
 """
 Shared audio processing functions for super-transcribe backends.
 Includes: preprocessing (denoise/normalize), channel extraction,
-subtitle burn-in, URL download, audio conversion.
+subtitle burn-in, URL download, audio conversion, probing,
+and dependency auto-installation.
 """
 
 import os
+import sys
+import json
 import subprocess
 import shutil
 import tempfile
 from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Dependency auto-install
+# ---------------------------------------------------------------------------
+
+def auto_install_package(package_name, import_name=None, quiet=False):
+    """Auto-install a Python package into the current interpreter's environment.
+
+    Uses uv (preferred) or pip as fallback. Works in venvs and system Python.
+    Returns True if the package is now importable, False otherwise.
+
+    Args:
+        package_name: pip/uv package name (e.g. "pyannote.audio")
+        import_name: Python import name if different from package (e.g. "pyannote.audio")
+        quiet: suppress progress output
+    """
+    if import_name is None:
+        import_name = package_name
+
+    # Check if already importable
+    try:
+        __import__(import_name.split(".")[0])
+        return True
+    except ImportError:
+        pass
+
+    if not quiet:
+        print(f"📦 {package_name} not found — installing automatically (one-time setup)...",
+              file=sys.stderr)
+
+    python_exe = sys.executable
+
+    try:
+        if shutil.which("uv"):
+            cmd = ["uv", "pip", "install", "--python", python_exe, package_name]
+        else:
+            cmd = [python_exe, "-m", "pip", "install", package_name]
+
+        subprocess.run(cmd, check=True, capture_output=quiet,
+                       text=True, timeout=300)
+
+        if not quiet:
+            print(f"✅ {package_name} installed successfully", file=sys.stderr)
+        return True
+
+    except subprocess.TimeoutExpired:
+        print(f"Error: Installation of {package_name} timed out after 5 minutes.",
+              file=sys.stderr)
+        return False
+    except subprocess.CalledProcessError as e:
+        stderr_text = e.stderr if hasattr(e, 'stderr') and e.stderr else str(e)
+        print(f"Error: Failed to install {package_name}: {stderr_text}",
+              file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"Error: Unexpected failure installing {package_name}: {e}",
+              file=sys.stderr)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +98,78 @@ def get_audio_duration(audio_path):
         pass
 
     return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Probe — quick audio metadata without transcription
+# ---------------------------------------------------------------------------
+
+def probe_audio(audio_path):
+    """Get audio metadata without transcribing. Returns dict with duration,
+    format, channels, sample_rate, bitrate, size_mb. Uses ffprobe if available,
+    falls back to soundfile for basic info.
+    """
+    result = {
+        "file": os.path.basename(audio_path),
+        "path": os.path.abspath(audio_path),
+        "duration": 0.0,
+        "format": Path(audio_path).suffix.lstrip(".").lower(),
+        "channels": None,
+        "sample_rate": None,
+        "bitrate": None,
+        "size_mb": round(os.path.getsize(audio_path) / (1024 * 1024), 2) if os.path.isfile(audio_path) else None,
+    }
+
+    if shutil.which("ffprobe"):
+        try:
+            cmd = [
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_format", "-show_streams", audio_path,
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            info = json.loads(proc.stdout)
+
+            fmt = info.get("format", {})
+            result["duration"] = round(float(fmt.get("duration", 0)), 2)
+            result["bitrate"] = int(fmt.get("bit_rate", 0)) if fmt.get("bit_rate") else None
+            result["format"] = fmt.get("format_name", result["format"])
+
+            # Find the audio stream
+            for stream in info.get("streams", []):
+                if stream.get("codec_type") == "audio":
+                    result["channels"] = int(stream.get("channels", 0)) or None
+                    result["sample_rate"] = int(stream.get("sample_rate", 0)) or None
+                    break
+        except Exception:
+            # Fall through to soundfile fallback
+            pass
+
+    # Fallback: try soundfile for basic info
+    if result["duration"] == 0.0:
+        try:
+            import soundfile as sf
+            sfinfo = sf.info(audio_path)
+            result["duration"] = round(sfinfo.duration, 2)
+            result["channels"] = sfinfo.channels
+            result["sample_rate"] = sfinfo.samplerate
+        except Exception:
+            pass
+
+    # Human-readable duration
+    dur = result["duration"]
+    if dur > 0:
+        mins, secs = divmod(int(dur), 60)
+        hrs, mins = divmod(mins, 60)
+        if hrs > 0:
+            result["duration_human"] = f"{hrs}h {mins}m {secs}s"
+        elif mins > 0:
+            result["duration_human"] = f"{mins}m {secs}s"
+        else:
+            result["duration_human"] = f"{secs}s"
+    else:
+        result["duration_human"] = "unknown"
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +315,7 @@ def is_url(path):
 def download_url(url, audio_format="wav", quiet=False):
     """Download audio from URL using yt-dlp. Returns (audio_path, tmpdir)."""
     import sys
+    from .exitcodes import EXIT_MISSING_DEP, EXIT_BAD_INPUT
     ytdlp = shutil.which("yt-dlp")
     if not ytdlp:
         pipx_path = Path.home() / ".local/share/pipx/venvs/yt-dlp/bin/yt-dlp"
@@ -188,7 +323,7 @@ def download_url(url, audio_format="wav", quiet=False):
             ytdlp = str(pipx_path)
         else:
             print("Error: yt-dlp not found. Install with: pipx install yt-dlp", file=sys.stderr)
-            sys.exit(1)
+            sys.exit(EXIT_MISSING_DEP)
 
     tmpdir = tempfile.mkdtemp(prefix="super-transcribe-")
     out_tmpl = os.path.join(tmpdir, "audio.%(ext)s")
@@ -206,13 +341,13 @@ def download_url(url, audio_format="wav", quiet=False):
     except subprocess.CalledProcessError as e:
         print(f"Error downloading URL: {e}", file=sys.stderr)
         shutil.rmtree(tmpdir, ignore_errors=True)
-        sys.exit(1)
+        sys.exit(EXIT_BAD_INPUT)
 
     files = list(Path(tmpdir).glob("audio.*"))
     if not files:
         print("Error: No audio file downloaded", file=sys.stderr)
         shutil.rmtree(tmpdir, ignore_errors=True)
-        sys.exit(1)
+        sys.exit(EXIT_BAD_INPUT)
 
     return str(files[0]), tmpdir
 
@@ -227,6 +362,40 @@ CONVERTIBLE_EXTS = {
     ".ogg", ".webm", ".opus",
 }
 AUDIO_EXTS = NATIVE_EXTS | CONVERTIBLE_EXTS
+
+
+def resolve_inputs(inputs):
+    """Expand globs, directories, and URLs into a flat list of audio paths.
+    Shared across all backends to avoid duplication.
+    """
+    import glob as _glob
+    files = []
+    for inp in inputs:
+        if is_url(inp):
+            files.append(inp)
+            continue
+        expanded = sorted(_glob.glob(inp, recursive=True)) or [inp]
+        for p_str in expanded:
+            p = Path(p_str)
+            if p.is_dir():
+                files.extend(
+                    str(f) for f in sorted(p.iterdir())
+                    if f.is_file() and f.suffix.lower() in AUDIO_EXTS
+                )
+            elif p.is_file():
+                if p.suffix.lower() not in AUDIO_EXTS:
+                    import sys
+                    print(
+                        f"Warning: skipping non-audio file: {p} "
+                        f"(supported: {', '.join(sorted(AUDIO_EXTS))})",
+                        file=sys.stderr,
+                    )
+                    continue
+                files.append(str(p))
+            else:
+                import sys
+                print(f"Warning: not found: {inp}", file=sys.stderr)
+    return files
 
 
 def convert_to_wav(audio_path, quiet=False):

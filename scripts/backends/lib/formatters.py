@@ -8,7 +8,6 @@ import html as _html
 import io
 import json
 import math
-import re
 
 
 # ---------------------------------------------------------------------------

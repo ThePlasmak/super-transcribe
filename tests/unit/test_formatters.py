@@ -254,7 +254,7 @@ class TestToCsv:
         assert "0.000" in csv_str
 
     def test_row_count(self, two_segs):
-        lines = [l for l in to_csv(two_segs).split("\n") if l]
+        lines = [line for line in to_csv(two_segs).split("\n") if line]
         assert len(lines) == 3  # header + 2 data rows
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
@@ -193,6 +194,10 @@ class TestToVtt:
 
     def test_speaker_label(self, speaker_segs):
         assert "[SPEAKER_1]" in to_vtt(speaker_segs)
+
+    def test_empty_segments(self):
+        # to_vtt([]) returns the WEBVTT header only (no cue blocks)
+        assert to_vtt([]).startswith("WEBVTT")
 
 
 # ── to_text ───────────────────────────────────────────────────────────────────
@@ -447,6 +452,18 @@ class TestToHtml:
         # Raw <script> tag must not appear unescaped
         assert "<script>alert(1)</script>" not in html
 
+    def test_xss_safe_word_level(self):
+        # AIDEV-NOTE: Verifies to_html escapes word-level text — word-level XSS fix
+        result = {
+            "file": "t.wav", "language": "en", "duration": 1.0,
+            "segments": [{
+                "start": 0.0, "end": 1.0, "text": "<script>",
+                "words": [{"word": "<script>", "start": 0.0, "end": 0.5, "probability": 0.9}],
+            }],
+        }
+        html = to_html(result)
+        assert "<script>" not in html
+
 
 # ── to_json ───────────────────────────────────────────────────────────────────
 
@@ -472,6 +489,7 @@ class TestFormatAgentJson:
         j = json.loads(format_agent_json(result_dict, "parakeet"))
         for field in ("text", "duration", "language", "backend", "segments", "word_count"):
             assert field in j, f"missing field: {field}"
+        assert isinstance(j["segments"], int), "segments should be an integer count"
 
     def test_backend_echoed(self, result_dict):
         j = json.loads(format_agent_json(result_dict, "faster-whisper"))
@@ -514,7 +532,6 @@ class TestFormatAgentJson:
         assert abs(j["avg_confidence"] - 0.9) < 0.01
 
     def test_avg_confidence_from_avg_logprob(self):
-        import math
         logprob = math.log(0.8)
         result = {
             "text": "hello", "language": "en", "duration": 1.0,

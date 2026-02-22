@@ -4,8 +4,10 @@ Supports: text, JSON, SRT, VTT, ASS, LRC, TTML, CSV, TSV, HTML.
 """
 
 import csv
+import html as _html
 import io
 import json
+import math
 import re
 
 
@@ -458,10 +460,10 @@ def to_html(result):
                     cls = "conf-med"
                 else:
                     cls = "conf-low"
-                word_parts.append(f'<span class="{cls}" title="{p:.2f}">{w["word"]}</span>')
+                # AIDEV-NOTE: html.escape required here — word text may contain angle brackets (XSS)
+                word_parts.append(f'<span class="{cls}" title="{p:.2f}">{_html.escape(w["word"])}</span>')
             text_html = "".join(word_parts)
         else:
-            import html as _html
             text_html = _html.escape(seg.get("text", "").strip())
 
         segs_html.append(
@@ -560,7 +562,6 @@ def _compute_avg_confidence(segments):
         # Check segment-level confidence
         if "avg_logprob" in seg:
             # Convert log probability to rough confidence (0-1)
-            import math
             confidences.append(math.exp(seg["avg_logprob"]))
         # Check word-level confidence
         for word in seg.get("words", []):

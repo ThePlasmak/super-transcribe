@@ -1,6 +1,6 @@
 # Backend venvs (created on first use)
-backends/faster-whisper/.venv/
-backends/parakeet/venv/
+scripts/backends/faster-whisper/.venv/
+scripts/backends/parakeet/venv/
 
 # Python cache
 __pycache__/

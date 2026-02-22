@@ -5,10 +5,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SKILL_DIR="$(dirname "$SCRIPT_DIR")"
 
-FW_DIR="$SKILL_DIR/backends/faster-whisper"
-PK_DIR="$SKILL_DIR/backends/parakeet"
+FW_DIR="$SCRIPT_DIR/backends/faster-whisper"
+PK_DIR="$SCRIPT_DIR/backends/parakeet"
 
 FW_TRANSCRIBE="$FW_DIR/transcribe"
 PK_TRANSCRIBE="$PK_DIR/transcribe"
@@ -69,16 +68,19 @@ AUTO-ROUTING:
     Parakeet is preferred when available for standard transcription
     (best accuracy + speed + auto-punctuation).
 
-    faster-whisper is used when you need features Parakeet doesn't have:
-    diarization, translation, 99+ languages, chapters, search, RSS,
-    ASS/LRC/TTML/CSV/HTML output, filler removal, noise preprocessing, etc.
+    faster-whisper is used when you need Whisper-specific features:
+    translation, initial prompt/hotwords, multilingual mode,
+    non-European languages (99+), or advanced inference tuning.
+
+    Shared features (diarization, search, chapters, filler removal,
+    output formats, preprocessing, burn-in, RSS) work on BOTH backends.
 
 EXAMPLES:
     ./scripts/transcribe audio.mp3                       # Auto-route
     ./scripts/transcribe --backend parakeet lecture.wav   # Force Parakeet
-    ./scripts/transcribe audio.mp3 --diarize             # Auto → faster-whisper
+    ./scripts/transcribe audio.mp3 --diarize             # Either backend
     ./scripts/transcribe audio.mp3 --translate            # Auto → faster-whisper
-    ./scripts/transcribe audio.mp3 --format ass -o s.ass  # Auto → faster-whisper
+    ./scripts/transcribe audio.mp3 --format ass -o s.ass  # Either backend
     ./scripts/transcribe --backends                       # Show what's installed
     ./scripts/transcribe --setup faster-whisper           # Pre-install backend
     ./scripts/transcribe --setup parakeet                 # Pre-install backend
@@ -148,25 +150,25 @@ Auto-routing logic:
 2. If any faster-whisper-only flag is detected → use faster-whisper
 3. Otherwise → prefer Parakeet (if available), fall back to faster-whisper
 
-Flags that force faster-whisper:
+SHARED features (work on BOTH backends):
     --diarize, --min-speakers, --max-speakers, --speaker-names, --export-speakers
-    --translate
     --search, --search-fuzzy
     --detect-chapters, --chapter-gap, --chapters-file, --chapter-format
-    --rss, --rss-latest
-    --format ass|lrc|ttml|csv|tsv|html  (formats Parakeet doesn't support)
-    --clean-filler
+    --format text|json|srt|vtt|ass|lrc|ttml|csv|tsv|html
+    --clean-filler, --filter-hallucinations
     --normalize, --denoise
     --burn-in
-    --filter-hallucinations
-    --multilingual
+    --merge-sentences, --detect-paragraphs, --paragraph-gap
+    --rss, --rss-latest
+    --channel
+    --stats-file
+
+Flags that force faster-whisper (Whisper-model-specific):
+    --translate, --multilingual
     --initial-prompt, --hotwords, --prefix
     --language-map
     --parallel
-    --channel
-    --merge-sentences
-    --detect-paragraphs, --paragraph-gap
-    --hallucination-silence-threshold
+    --stream (fw streaming with segment output)
     --no-condition-on-previous-text, --condition-on-previous-text
     --clip-timestamps
     --temperature (explicit)
@@ -183,40 +185,46 @@ Flags that force faster-whisper:
     --prompt-reset-on-temperature
     --chunk-length (fw meaning)
     --max-new-tokens
-    --stats-file
+    --hallucination-silence-threshold
     --log-level
-    --retries
-    --keep-temp
-    --hf-token
-    --revision
+    --retries, --keep-temp
+    --hf-token, --revision
+    --compute-type, --threads, --model-dir
+    --output-template
+    --word-timestamps (fw-specific; parakeet uses --timestamps)
+    --progress
 
 Flags that force Parakeet:
     --long-form
-    --streaming
+    --streaming (parakeet chunked inference)
+
+Language routing:
+    Non-European languages (e.g. -l ja, -l zh, -l ar) → faster-whisper
+    European languages or auto-detect → either backend
 EOF
     exit 0
 }
 
 # ── Faster-whisper-only flags ─────────────────────────────────────────
+# These flags are specific to the Whisper model or faster-whisper's inference engine.
+# Shared features (diarization, search, chapters, filler, formats, preprocessing,
+# burn-in, RSS, speakers) are NOT listed here — they work on both backends.
 
 # No-value flags that force faster-whisper
 FW_ONLY_NOVAL=(
-    --diarize --translate --clean-filler --normalize --denoise
-    --filter-hallucinations --multilingual --search-fuzzy
-    --merge-sentences --detect-paragraphs --detect-chapters
+    --translate --multilingual
     --no-condition-on-previous-text --condition-on-previous-text
     --no-vad --no-batch --no-timestamps --no-suppress-blank
     --progress --keep-temp
+    --word-timestamps
+    --detect-language-only
 )
 
 # Value flags that force faster-whisper
 FW_ONLY_WITHVAL=(
-    --min-speakers --max-speakers --speaker-names --export-speakers
-    --search --chapter-gap --chapters-file --chapter-format
-    --rss --rss-latest --burn-in
     --initial-prompt --hotwords --prefix
-    --language-map --parallel --channel
-    --paragraph-gap --hallucination-silence-threshold
+    --language-map --parallel
+    --hallucination-silence-threshold
     --clip-timestamps --temperature
     --compression-ratio-threshold --log-prob-threshold --min-confidence
     --vad-threshold --vad-neg-threshold --vad-onset --vad-offset
@@ -225,16 +233,19 @@ FW_ONLY_WITHVAL=(
     --prepend-punctuations --append-punctuations
     --best-of --patience --repetition-penalty --no-repeat-ngram-size
     --prompt-reset-on-temperature --chunk-length --max-new-tokens
-    --stats-file --log-level --retries --hf-token --revision
+    --log-level --retries --hf-token --revision
     --compute-type --threads --model-dir
     --output-template
+    --no-speech-threshold
+    --language-detection-threshold --language-detection-segments
+    --length-penalty
 )
 
 # Parakeet-only flags
 PK_ONLY_NOVAL=(--long-form --streaming)
 
-# Formats only faster-whisper handles
-FW_ONLY_FORMATS_RE="^(ass|lrc|ttml|csv|tsv|html)$"
+# Non-European languages that require faster-whisper (Parakeet only supports 25 EU langs)
+PARAKEET_LANGS="bg hr cs da nl en et fi fr de el hu it lv lt mt pl pt ro sk sl es sv ru uk"
 
 # ── Parse args ────────────────────────────────────────────────────────
 
@@ -276,27 +287,37 @@ while [ $# -gt 0 ]; do
             FORCED_BACKEND="${arg#--backend=}"; shift; continue
             ;;
 
-        # ── Format check (pass through + inspect value) ──
-        -f|--format)
+        # ── Language check (non-EU languages force faster-whisper) ──
+        -l|--language)
             PASSTHROUGH+=("$arg")
             if [ $# -ge 2 ]; then
-                IFS=',' read -ra fmts <<< "$2"
-                for fmt in "${fmts[@]}"; do
-                    if [[ "$fmt" =~ $FW_ONLY_FORMATS_RE ]]; then
-                        needs_fw=true; break
+                lang="$2"
+                # Check if this language is NOT in Parakeet's supported list
+                lang_supported=false
+                for pl in $PARAKEET_LANGS; do
+                    if [ "$lang" = "$pl" ]; then
+                        lang_supported=true
+                        break
                     fi
                 done
+                if ! $lang_supported; then
+                    needs_fw=true
+                fi
             fi
             ;;
-        --format=*)
+        --language=*)
             PASSTHROUGH+=("$arg")
-            val="${arg#--format=}"
-            IFS=',' read -ra fmts <<< "$val"
-            for fmt in "${fmts[@]}"; do
-                if [[ "$fmt" =~ $FW_ONLY_FORMATS_RE ]]; then
-                    needs_fw=true; break
+            lang="${arg#--language=}"
+            lang_supported=false
+            for pl in $PARAKEET_LANGS; do
+                if [ "$lang" = "$pl" ]; then
+                    lang_supported=true
+                    break
                 fi
             done
+            if ! $lang_supported; then
+                needs_fw=true
+            fi
             ;;
 
         # ── Flag classification ──
@@ -342,7 +363,7 @@ normalize_backend() {
 if [ -n "$FORCED_BACKEND" ]; then
     BACKEND=$(normalize_backend "$FORCED_BACKEND")
     [ -n "$BACKEND" ] || die "Unknown backend '$FORCED_BACKEND'. Choose: faster-whisper | parakeet"
-    backend_available "$BACKEND" || die "Backend '$BACKEND' files are missing from $SKILL_DIR/backends/"
+    backend_available "$BACKEND" || die "Backend '$BACKEND' files are missing from $SCRIPT_DIR/backends/"
 elif $needs_fw && $needs_pk; then
     die "Conflicting flags: some require faster-whisper, others require parakeet. Use --backend to pick one."
 elif $needs_fw; then
@@ -358,7 +379,7 @@ else
     elif backend_available "faster-whisper"; then
         BACKEND="faster-whisper"
     else
-        die "No transcription backends found in $SKILL_DIR/backends/"
+        die "No transcription backends found in $SCRIPT_DIR/backends/"
     fi
 fi
 

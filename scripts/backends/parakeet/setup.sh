@@ -12,9 +12,12 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/venv"
 
+INSTALL_DIARIZE=false
+
 # Parse arguments
 for arg in "$@"; do
     case "$arg" in
+        --diarize) INSTALL_DIARIZE=true ;;
         --update)
             if [ ! -d "$VENV_DIR" ]; then
                 echo "❌ No venv found at $VENV_DIR — run ./setup.sh first"
@@ -126,9 +129,10 @@ print(f'nemo_toolkit: {importlib.metadata.version(\"nemo_toolkit\")}')
             exit 0
             ;;
         --help|-h)
-            echo "Usage: ./setup.sh [--check] [--update]"
+            echo "Usage: ./setup.sh [--diarize] [--check] [--update]"
             echo ""
             echo "Options:"
+            echo "  --diarize    Also verify/install NeMo diarization dependencies"
             echo "  --check      Verify system dependencies (GPU, Python, venv, NeMo, ffmpeg)"
             echo "  --update     Upgrade NeMo toolkit in the existing venv"
             exit 0
@@ -274,6 +278,34 @@ echo "✓ NeMo toolkit installed"
 pip_install soundfile
 echo "✓ soundfile installed"
 
+# Install PyYAML + OmegaConf (needed for NeMo diarization config)
+pip_install pyyaml omegaconf
+echo "✓ yaml/omegaconf installed"
+
+# Install diarization dependencies if requested
+if [ "$INSTALL_DIARIZE" = true ]; then
+    echo ""
+    echo "🔊 Installing NeMo diarization dependencies..."
+    echo "   NeMo's ClusteringDiarizer uses TitaNet + MarbleNet VAD."
+    echo "   These models will be downloaded on first use."
+    echo ""
+    # pyannote.audio as fallback diarizer
+    pip_install pyannote.audio
+    echo "✓ pyannote.audio installed (fallback diarizer)"
+
+    # Check for HuggingFace token (needed for pyannote fallback)
+    HF_TOKEN_PATH="$HOME/.cache/huggingface/token"
+    if [ ! -f "$HF_TOKEN_PATH" ]; then
+        echo ""
+        echo "⚠️  No HuggingFace token found at $HF_TOKEN_PATH"
+        echo "   NeMo diarization works without a token, but pyannote fallback requires:"
+        echo "   1. A HuggingFace account and token (huggingface-cli login)"
+        echo "   2. Accept: https://hf.co/pyannote/speaker-diarization-3.1"
+    else
+        echo "✓ HuggingFace token found"
+    fi
+fi
+
 # Verify CUDA is available in the venv
 echo ""
 CUDA_VERIFY=$("$VENV_DIR/bin/python" -c "import torch; print(torch.cuda.is_available())" 2>/dev/null || echo "False")
@@ -308,10 +340,13 @@ if [ "$CUDA_VERIFY" = "True" ]; then
 else
     echo "💻 CPU mode — transcription will work but be slower"
 fi
+if [ "$INSTALL_DIARIZE" = true ]; then
+    echo "🔊 Speaker diarization enabled (--diarize flag)"
+fi
 echo ""
 echo "Usage:"
 echo "  $SCRIPT_DIR/scripts/transcribe audio.wav"
 echo "  $SCRIPT_DIR/scripts/transcribe audio.mp3 --format srt -o subtitles.srt"
-echo "  $SCRIPT_DIR/scripts/transcribe audio.wav --timestamps --format json -o result.json"
+echo "  $SCRIPT_DIR/scripts/transcribe audio.wav --diarize"
 echo ""
 echo "First run will download the model (~1.2GB for parakeet-tdt-0.6b-v3)."

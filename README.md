@@ -1,8 +1,8 @@
 # 🎙️ Super-Transcribe
 
-A unified speech-to-text skill with two bundled engines for the best speed and a wider featureset — [NVIDIA Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (NeMo) for the former, and [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2) for the latter.
+A speech-to-text skill with two bundled engines for the best speed and featureset — [NVIDIA Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (NeMo) for the former, and [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2) for the latter.
 
-The setup script installs the fastest backend for your setup, and the main script auto-selects the best backend for your task (loading the other backend if necessary).
+The setup script installs the fastest backend for your setup, and the main script auto-selects the best backend for your task (and loads the other backend if necessary).
 
 ## First-Time Setup
 
@@ -22,7 +22,7 @@ See **Prerequisites** below for more information about backend compatibility.
 
 ## Why Two Backends?
 
-In general, Parakeet has better speed and accuracy, while faster-whisper supports more features.
+In general, Parakeet has better speed and accuracy, while faster-whisper has more features.
 
 | | 🦜 Parakeet (default) | 🗣️ faster-whisper |
 |---|---|---|

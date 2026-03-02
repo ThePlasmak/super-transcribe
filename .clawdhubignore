@@ -1,12 +1,36 @@
+# Docs & metadata (not needed at runtime)
 README.md
 CHANGELOG.md
 LICENSE
-
-*.zip
-
 CLAUDE.md
+
+# Dev/test config
+pyproject.toml
+pytest.ini
 requirements-test.txt
+setup.sh
+
+# Test suite
+tests/
+
+# Plans & docs
 docs/
 IMPROVEMENTS-SUMMARY*
 TEST-SCENARIOS*
-pytest.ini
+
+# VCS & tooling
+.git/
+.gitignore
+.claude/
+.clawdhubignore
+.ruff_cache/
+.pytest_cache/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Archives
+*.zip

@@ -1,4 +1,4 @@
-# 🎙️ Super-Transcribe
+# Super-Transcribe
 
 A speech-to-text skill with two bundled engines for the best speed and featureset — [NVIDIA Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (NeMo) for the former, and [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2) for the latter.
 

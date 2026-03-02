@@ -1,7 +1,7 @@
 ---
 name: super-transcribe
 description: "Unified speech-to-text skill. Use when the user asks to transcribe audio or video, generate subtitles, identify speakers, translate speech, search transcripts, diarize meetings, or perform any speech-to-text task. Also use when a voice message or audio file appears in chat and the user's intent to transcribe it is very clear."
-version: 1.0.0
+version: 1.0.2
 author: Sarah Mak
 tags:
   [
@@ -906,7 +906,7 @@ Whenever word-level timestamps are computed (`--word-timestamps`, `--diarize`, o
 - **Diarization model fails**: Ensure HuggingFace token exists and model agreements accepted
 - **URL download fails**: Check yt-dlp is installed (`pipx install yt-dlp`)
 - **Check installed version**: `./scripts/transcribe --version`
-- **Upgrade**: `./setup.sh --update`
+- **Upgrade**: `./scripts/backends/faster-whisper/setup.sh --update`
 - **VAD splits speech incorrectly**: Tune with `--vad-threshold 0.3` or `--min-silence-duration 300`
 
 ## Faster-Whisper References
@@ -990,7 +990,7 @@ Essential commands (Parakeet-specific features only — shared features are in t
 | **Danish**               | `./scripts/transcribe audio.wav -l da`                                                            | Auto-selects Danish model          |
 | **Canary translation**   | `./scripts/transcribe audio.wav --backend parakeet --translate --source-lang fr --target-lang de` | Bidirectional EU translation       |
 | **Fast Canary**          | `./scripts/transcribe audio.wav -m canary-flash --translate`                                      | >1000× RT, EN/DE/FR/ES only        |
-| **Upgrade NeMo**         | `./setup.sh --update`                                                                             | Upgrade + verify torch >= 2.6.0    |
+| **Upgrade NeMo**         | `./scripts/backends/parakeet/setup.sh --update`                                                   | Upgrade + verify torch >= 2.6.0    |
 
 ## Parakeet Output
 
@@ -1071,8 +1071,8 @@ Parakeet includes automatic wav2vec2 forced alignment that refines word-level ti
 | Problem                              | Solution                                                                                          |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------- |
 | **CUDA not available**               | Install PyTorch with CUDA: `pip install torch --index-url https://download.pytorch.org/whl/cu121` |
-| **NeMo 2.6+ crashes**                | Requires torch >= 2.6.0. Run `./setup.sh --update` to upgrade both torch and NeMo                 |
-| **NeMo import error**                | Run `./setup.sh` or `pip install nemo_toolkit[asr]`                                               |
+| **NeMo 2.6+ crashes**                | Requires torch >= 2.6.0. Run `./scripts/backends/parakeet/setup.sh --update` to upgrade both torch and NeMo |
+| **NeMo import error**                | Run `./setup.sh` or `./scripts/backends/parakeet/setup.sh`                                        |
 | **Out of memory**                    | Use `--fast` (110M model, ~1GB VRAM) or `--device cpu`                                            |
 | **Model download fails**             | Check HuggingFace connectivity and `~/.cache/huggingface/` permissions                            |
 | **ffmpeg not found**                 | Install ffmpeg: `apt install ffmpeg` (needed for non-WAV input)                                   |

@@ -2,6 +2,16 @@
 
 super-transcribe is an OpenClaw (agentic chatbot) skill that transcribes audio via two backends: Parakeet and faster-whisper. Generally, the former is faster and more accurate, while the latter has more features.
 
+# OpenClaw Skill Notes
+
+## Version Numbers
+
+The version must be kept in sync across **both** files:
+- `skill.json` → `"version"` field
+- `SKILL.md` → `version:` in the frontmatter
+
+Always update both when changing the version.
+
 ## Standards and Guidelines
 
 ### Coding Standards

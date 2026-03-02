@@ -8,7 +8,6 @@ CLAUDE.md
 pyproject.toml
 pytest.ini
 requirements-test.txt
-setup.sh
 
 # Test suite
 tests/

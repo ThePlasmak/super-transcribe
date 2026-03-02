@@ -40,12 +40,10 @@ The router automatically picks the most suitable backend for your task. The agen
 **Shared (both backends):**
 - 10 output formats
 - Speaker diarization
-- Search
 - Chapter detection
 - Filler removal
-- Denoise/normalize
-- Subtitle burn-in
-- RSS/podcast feeds
+- Denoise/normalize audio
+- Check RSS/podcast feeds
 - Batch processing
 
 **Parakeet-only (selected features):**

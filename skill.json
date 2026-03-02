@@ -1,19 +1,25 @@
 {
   "name": "super-transcribe",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Unified speech-to-text that auto-routes to the best backend (faster-whisper or parakeet). Lazy-loads backends on first use.",
   "author": "Sarah Mak",
   "tags": [
+    "audio",
     "transcription",
-    "speech-to-text",
     "whisper",
     "parakeet",
-    "unified",
-    "gpu",
+    "speech-to-text",
+    "ml",
     "cuda",
-    "audio",
-    "ml"
+    "gpu",
+    "subtitles",
+    "diarization",
+    "podcast",
+    "unified"
   ],
+  "openclaw": {
+    "emoji": "🎙️"
+  },
   "requires": {
     "bins": [
       "python3"

@@ -1,6 +1,6 @@
 ---
 name: super-transcribe
-description: "Unified speech-to-text skill. Use when the user asks to transcribe audio or video, generate subtitles, identify speakers, translate speech, search transcripts, diarize meetings, or perform any speech-to-text task. Also use when a voice message or audio file appears in chat and the user's intent to transcribe it is extremely clear."
+description: "Unified speech-to-text skill. Use when the user asks to transcribe audio or video, generate subtitles, identify speakers, translate speech, search transcripts, diarize meetings, or perform any speech-to-text task. Also use when a voice message or audio file appears in chat and the user's intent to transcribe it is very clear."
 version: 1.0.0
 author: Sarah Mak
 tags:
@@ -68,6 +68,7 @@ Key fields: `gpu` (name + VRAM), `ffmpeg`, `backends` status, `estimated_install
 ```
 
 **Tell the user what will be downloaded before proceeding.** Relay from the `estimated` field:
+
 - Which backend and why it was chosen
 - Total download size (setup + model on first use)
 
@@ -89,11 +90,12 @@ For GPU systems where the user wants a smaller install, see **Lean Install Optio
 **Quickstart installs exactly ONE backend** — the best for detected hardware:
 
 | Hardware    | Backend installed | Setup download                    | Model (first use) | Total   |
-| ----------- | ----------------- | --------------------------------- | ------------------ | ------- |
-| NVIDIA GPU  | Parakeet (NeMo)   | ~5 GB (PyTorch + CUDA + NeMo)     | ~1.2 GB            | ~6.2 GB |
-| CPU / macOS | faster-whisper    | ~300 MB (CTranslate2, no PyTorch) | ~756 MB            | ~1 GB   |
+| ----------- | ----------------- | --------------------------------- | ----------------- | ------- |
+| NVIDIA GPU  | Parakeet (NeMo)   | ~5 GB (PyTorch + CUDA + NeMo)     | ~1.2 GB           | ~6.2 GB |
+| CPU / macOS | faster-whisper    | ~300 MB (CTranslate2, no PyTorch) | ~756 MB           | ~1 GB   |
 
 **NOT installed by quickstart** (deferred until actually needed):
+
 - **Second backend** — auto-installs only when the user triggers a feature that needs it (`--translate` or non-EU language → faster-whisper; `--fast`/`--multitalker` → Parakeet)
 - **System deps** — install separately **only if the user needs them**:
   - `ffmpeg` — only for non-WAV input (mp3/m4a/mp4/ogg). Install: `sudo apt install ffmpeg`

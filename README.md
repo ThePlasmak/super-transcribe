@@ -106,7 +106,6 @@ Key features to aid agent use:
 ## Documentation
 
 - **[SKILL.md](SKILL.md)** — Full reference with all options, model tables, and agent guidance
-- **[CHANGELOG.md](CHANGELOG.md)** — Version history
 
 ## Licenses
 

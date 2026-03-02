@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import pytest
-
 from lib.postprocess import (
     detect_chapters,
     detect_paragraphs,
@@ -17,7 +16,7 @@ def seg(start, end, text, **kwargs):
     return {"start": start, "end": end, "text": text, **kwargs}
 
 
-# AIDEV-NOTE: detect_paragraphs mutates segment dicts in-place; always pass fresh copies per test.
+# AIDEV-NOTE: detect_paragraphs mutates segments in-place; pass fresh copies per test.
 
 
 # ── filter_hallucinations ─────────────────────────────────────────────────────

@@ -4,9 +4,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from lib.rss import fetch_rss_episodes
-
 
 VALID_RSS = b"""<?xml version="1.0"?>
 <rss version="2.0">

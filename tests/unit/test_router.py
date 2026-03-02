@@ -372,7 +372,8 @@ class TestPKOnlyFlags:
 class TestLanguageRouting:
     """Non-EU languages force faster-whisper; EU/supported langs use default routing."""
 
-    # AIDEV-NOTE: PARAKEET_LANGS = "bg hr cs da nl en et fi fr de el hu it lv lt mt pl pt ro sk sl es sv ru uk"
+    # AIDEV-NOTE: PARAKEET_LANGS = "bg hr cs da nl en et fi fr de el hu it lv lt mt pl
+    # pt ro sk sl es sv ru uk"
 
     @pytest.mark.parametrize("lang", ["ja", "zh", "ar", "ko", "hi"])
     def test_non_eu_language_routes_to_fw(self, router_env: Path, lang: str) -> None:
@@ -487,7 +488,9 @@ class TestPassthrough:
         assert result.returncode == 0
         assert str(TONE_WAV) in result.stdout
 
-    def test_multiple_audio_files_passed_through(self, router_env: Path, tmp_path: Path) -> None:
+    def test_multiple_audio_files_passed_through(
+        self, router_env: Path, tmp_path: Path,
+    ) -> None:
         """Multiple audio files should all be forwarded to the selected backend."""
         wav2 = tmp_path / "tone2.wav"
         shutil.copy(TONE_WAV, wav2)
@@ -514,7 +517,8 @@ class TestBackendReadiness:
         result = run(router_env_no_backends, str(TONE_WAV))
         # The router should mention setup / first-time on stderr
         combined = result.stderr + result.stdout
-        assert "setup" in combined.lower() or "first" in combined.lower() or "install" in combined.lower()
+        low = combined.lower()
+        assert "setup" in low or "first" in low or "install" in low
 
     def test_no_setup_message_when_backend_ready(self, router_env: Path) -> None:
         """When both backends are ready, no 'first-time setup' message appears."""

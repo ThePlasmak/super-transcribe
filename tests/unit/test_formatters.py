@@ -5,7 +5,6 @@ import json
 import math
 
 import pytest
-
 from lib.formatters import (
     format_agent_json,
     format_ts_ass,
@@ -24,7 +23,6 @@ from lib.formatters import (
     to_ttml,
     to_vtt,
 )
-
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
 

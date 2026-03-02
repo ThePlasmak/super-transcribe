@@ -13,25 +13,24 @@ Features:
 - Performance statistics
 """
 
-import sys
-import os
-import json
-import time
-import copy
-import csv
-import fnmatch
-import glob
+from __future__ import annotations
+
 import argparse
-import tempfile
-import subprocess
-import shutil
-import re
+import copy
+import fnmatch
+import json
 import logging
-from pathlib import Path
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 try:
-    from faster_whisper import WhisperModel, BatchedInferencePipeline
+    from faster_whisper import BatchedInferencePipeline, WhisperModel
 except ImportError:
     print("Error: faster-whisper not installed", file=sys.stderr)
     print("Run setup: ./setup.sh", file=sys.stderr)
@@ -43,30 +42,45 @@ _LIB_DIR = _BACKEND_DIR.parent / "lib"
 if str(_LIB_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR.parent))
 
-from lib.formatters import (
-    format_ts_srt, format_ts_vtt, format_ts_ass, format_ts_ttml,
-    format_duration, split_words_by_chars,
-    to_srt, to_vtt, to_text, to_tsv, to_csv, to_ass, to_lrc, to_ttml, to_html, to_json,
-    format_result, EXT_MAP, VALID_FORMATS,
-    format_agent_json,
-)
-from lib.exitcodes import EXIT_OK, EXIT_GENERAL, EXIT_MISSING_DEP, EXIT_BAD_INPUT, EXIT_GPU_ERROR
-from lib.postprocess import (
-    filter_hallucinations, remove_filler_words, detect_paragraphs,
-    merge_sentences, detect_chapters, format_chapters_output,
-    search_transcript, format_search_results, _TERMINAL_PUNCT,
-)
-from lib.audio import (
-    is_url, download_url, preprocess_audio, extract_channel,
-)
-from lib.speakers import apply_speaker_names, export_speakers_audio
-from lib.rss import fetch_rss_episodes
 from lib.alignment import run_alignment
-
+from lib.audio import (
+    burn_subtitles,
+    download_url,
+    extract_channel,
+    is_url,
+    preprocess_audio,
+)
+from lib.exitcodes import (
+    EXIT_BAD_INPUT,
+    EXIT_GENERAL,
+    EXIT_GPU_ERROR,
+    EXIT_MISSING_DEP,
+)
+from lib.formatters import (
+    EXT_MAP,
+    format_agent_json,
+    format_duration,
+    format_result,
+    format_ts_vtt,
+    to_srt,
+)
+from lib.postprocess import (
+    detect_chapters,
+    detect_paragraphs,
+    filter_hallucinations,
+    format_chapters_output,
+    format_search_results,
+    merge_sentences,
+    remove_filler_words,
+    search_transcript,
+)
+from lib.rss import fetch_rss_episodes
+from lib.speakers import apply_speaker_names, export_speakers_audio
 
 # ---------------------------------------------------------------------------
 # Batch resume support
 # ---------------------------------------------------------------------------
+
 
 def load_progress(progress_path):
     """Load batch progress checkpoint file."""
@@ -92,10 +106,12 @@ def save_progress(progress_path, progress):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def check_cuda_available():
     """Check if CUDA is available and return device info."""
     try:
         import torch
+
         if torch.cuda.is_available():
             return True, torch.cuda.get_device_name(0)
         return False, None
@@ -106,18 +122,21 @@ def check_cuda_available():
 # Output formatters, postprocessing, audio helpers, speakers, RSS — imported from lib/
 
 
-
 # ---------------------------------------------------------------------------
 # Speaker diarization
 # ---------------------------------------------------------------------------
 
-def run_diarization(audio_path, segments, quiet=False, min_speakers=None, max_speakers=None, hf_token=None):
+
+def run_diarization(
+    audio_path, segments, quiet=False, min_speakers=None, max_speakers=None, hf_token=None
+):
     """Assign speaker labels to segments using pyannote.audio."""
     try:
         from pyannote.audio import Pipeline as PyannotePipeline
     except ImportError:
         # Auto-install pyannote.audio on first use
         from lib.audio import auto_install_package
+
         if not auto_install_package("pyannote.audio", quiet=quiet):
             print(
                 "  Manual install: ./setup.sh --diarize\n"
@@ -150,6 +169,7 @@ def run_diarization(audio_path, segments, quiet=False, min_speakers=None, max_sp
     # Move to GPU if available
     try:
         import torch
+
         if torch.cuda.is_available():
             pipeline.to(torch.device("cuda"))
     except Exception:
@@ -164,7 +184,8 @@ def run_diarization(audio_path, segments, quiet=False, min_speakers=None, max_sp
         try:
             subprocess.run(
                 ["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", tmp_wav],
-                check=True, capture_output=True,
+                check=True,
+                capture_output=True,
             )
             diarize_path = tmp_wav
         except Exception:
@@ -227,13 +248,15 @@ def run_diarization(audio_path, segments, quiet=False, min_speakers=None, max_sp
         def flush_group():
             if not current_words:
                 return
-            new_segments.append({
-                "start": current_words[0]["start"],
-                "end": current_words[-1]["end"],
-                "text": "".join(w["word"] for w in current_words),
-                "speaker": current_speaker,
-                "words": list(current_words),
-            })
+            new_segments.append(
+                {
+                    "start": current_words[0]["start"],
+                    "end": current_words[-1]["end"],
+                    "text": "".join(w["word"] for w in current_words),
+                    "speaker": current_speaker,
+                    "words": list(current_words),
+                }
+            )
 
         for w in all_words:
             sp = w.get("speaker")
@@ -264,7 +287,6 @@ def run_diarization(audio_path, segments, quiet=False, min_speakers=None, max_sp
         print(f"   Found {len(seen)} speaker(s)", file=sys.stderr)
 
     return segments, list(seen.values())
-
 
 
 def parse_language_map(lang_map_str):
@@ -322,12 +344,12 @@ def resolve_file_language(audio_path, lang_map, fallback=None):
 
 
 # resolve_inputs and AUDIO_EXTS imported from lib.audio (shared across backends)
-from lib.audio import resolve_inputs, AUDIO_EXTS  # noqa: E402
-
+from lib.audio import resolve_inputs  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Core transcription
 # ---------------------------------------------------------------------------
+
 
 def transcribe_file(audio_path, pipeline, args):
     """Transcribe a single audio file. Returns result dict."""
@@ -341,20 +363,20 @@ def transcribe_file(audio_path, pipeline, args):
     # --- Channel extraction (stereo → mono channel) ---
     channel = getattr(args, "channel", "mix")
     if channel != "mix":
-        effective_path, channel_tmp = extract_channel(
-            effective_path, channel, quiet=args.quiet
-        )
+        effective_path, channel_tmp = extract_channel(effective_path, channel, quiet=args.quiet)
 
     if args.normalize or args.denoise:
         effective_path, preprocess_tmp = preprocess_audio(
-            effective_path, normalize=args.normalize, denoise=args.denoise,
+            effective_path,
+            normalize=args.normalize,
+            denoise=args.denoise,
             quiet=args.quiet,
         )
 
     need_words = (
         args.word_timestamps
         or args.min_confidence is not None
-        or args.diarize   # word-level needed for accurate speaker assignment
+        or args.diarize  # word-level needed for accurate speaker assignment
     ) and not args.stream  # streaming skips post-processing
 
     kw = dict(
@@ -389,7 +411,9 @@ def transcribe_file(audio_path, pipeline, args):
             if len(parts) == 2:
                 parsed_clips.append({"start": float(parts[0]), "end": float(parts[1])})
             else:
-                raise ValueError(f"Invalid clip range '{clip_str}'. Expected 'start,end' (seconds).")
+                raise ValueError(
+                    f"Invalid clip range '{clip_str}'. Expected 'start,end' (seconds)."
+                )
         kw["clip_timestamps"] = parsed_clips
     if args.progress:
         kw["log_progress"] = True
@@ -400,7 +424,9 @@ def transcribe_file(audio_path, pipeline, args):
     # VAD tuning parameters
     vad_dict = {}
     vad_threshold = args.vad_threshold if args.vad_threshold is not None else args.vad_onset
-    vad_neg_threshold = args.vad_neg_threshold if args.vad_neg_threshold is not None else args.vad_offset
+    vad_neg_threshold = (
+        args.vad_neg_threshold if args.vad_neg_threshold is not None else args.vad_offset
+    )
     if vad_threshold is not None:
         vad_dict["threshold"] = vad_threshold
     if vad_neg_threshold is not None:
@@ -475,7 +501,10 @@ def transcribe_file(audio_path, pipeline, args):
             ids = [int(x.strip()) for x in args.suppress_tokens.split(",") if x.strip()]
             kw["suppress_tokens"] = [-1] + ids
         except ValueError:
-            print(f"⚠️  Invalid --suppress-tokens value: {args.suppress_tokens!r} — skipped", file=sys.stderr)
+            print(
+                f"⚠️  Invalid --suppress-tokens value: {args.suppress_tokens!r} — skipped",
+                file=sys.stderr,
+            )
 
     if args.max_initial_timestamp is not None:
         kw["max_initial_timestamp"] = args.max_initial_timestamp
@@ -533,8 +562,11 @@ def transcribe_file(audio_path, pipeline, args):
     speakers = None
     if args.diarize and not args.stream:
         segments, speakers = run_diarization(
-            effective_path, segments, quiet=args.quiet,
-            min_speakers=args.min_speakers, max_speakers=args.max_speakers,
+            effective_path,
+            segments,
+            quiet=args.quiet,
+            min_speakers=args.min_speakers,
+            max_speakers=args.max_speakers,
             hf_token=args.hf_token,
         )
         # Apply speaker name mapping if provided
@@ -587,6 +619,7 @@ def transcribe_file(audio_path, pipeline, args):
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def main():
     # Pre-import onnxruntime silently to suppress the harmless WSL2 device-discovery warning.
     # onnxruntime writes directly to stderr fd when first imported (device_discovery.cc:211).
@@ -610,6 +643,7 @@ def main():
     if "--version" in sys.argv:
         try:
             import importlib.metadata
+
             _fw_version = importlib.metadata.version("faster-whisper")
         except Exception:
             _fw_version = getattr(sys.modules.get("faster_whisper"), "__version__", "unknown")
@@ -620,7 +654,15 @@ def main():
         _venv_python = _SCRIPT_DIR.parent / ".venv" / "bin" / "python"
         if shutil.which("uv"):
             subprocess.run(
-                ["uv", "pip", "install", "--python", str(_venv_python), "--upgrade", "faster-whisper"],
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--python",
+                    str(_venv_python),
+                    "--upgrade",
+                    "faster-whisper",
+                ],
                 check=True,
             )
         else:
@@ -630,6 +672,7 @@ def main():
             )
         try:
             import importlib.metadata
+
             _fw_version = importlib.metadata.version("faster-whisper")
         except Exception:
             _fw_version = "unknown"
@@ -652,450 +695,645 @@ def main():
 
     # --- Positional ---
     p.add_argument(
-        "audio", nargs="*", metavar="AUDIO",
+        "audio",
+        nargs="*",
+        metavar="AUDIO",
         help="Audio file(s), directory, glob pattern, or URL. Optional when --rss is used.",
     )
 
     # --- Model & language ---
     p.add_argument(
-        "-m", "--model", default="distil-large-v3.5",
+        "-m",
+        "--model",
+        default="distil-large-v3.5",
         help="Whisper model (default: distil-large-v3.5). "
-             "Common models: distil-large-v3.5 (fastest, best accuracy), "
-             "large-v3-turbo / turbo, large-v3, medium, small, tiny, base. "
-             "Also accepts full HuggingFace model paths.",
+        "Common models: distil-large-v3.5 (fastest, best accuracy), "
+        "large-v3-turbo / turbo, large-v3, medium, small, tiny, base. "
+        "Also accepts full HuggingFace model paths.",
     )
     p.add_argument(
-        "--revision", default=None, metavar="REV",
+        "--revision",
+        default=None,
+        metavar="REV",
         help="Model revision (git branch/tag/commit hash) to pin a specific version",
     )
     p.add_argument(
-        "-l", "--language", default=None,
+        "-l",
+        "--language",
+        default=None,
         help="Language code, e.g. en, es, fr (auto-detects if omitted)",
     )
     p.add_argument(
-        "--language-map", default=None, metavar="MAP",
+        "--language-map",
+        default=None,
+        metavar="MAP",
         help="Per-file language override for batch mode. Inline: 'interview*.mp3=en,lecture.wav=fr' "
-             "or JSON file: '@/path/to/map.json'. Overrides --language for matched files; "
-             "unmatched files fall back to --language (or auto-detect). "
-             "Patterns support fnmatch globs on filename or stem.",
+        "or JSON file: '@/path/to/map.json'. Overrides --language for matched files; "
+        "unmatched files fall back to --language (or auto-detect). "
+        "Patterns support fnmatch globs on filename or stem.",
     )
     p.add_argument(
-        "--initial-prompt", default=None, metavar="TEXT",
+        "--initial-prompt",
+        default=None,
+        metavar="TEXT",
         help="Prompt to condition the model (terminology, formatting hints)",
     )
     p.add_argument(
-        "--prefix", default=None, metavar="TEXT",
+        "--prefix",
+        default=None,
+        metavar="TEXT",
         help="Prefix to condition the first segment (e.g. known starting words)",
     )
     p.add_argument(
-        "--hotwords", default=None, metavar="WORDS",
+        "--hotwords",
+        default=None,
+        metavar="WORDS",
         help="Hotwords to boost recognition (space-separated)",
     )
     p.add_argument(
-        "--translate", action="store_true",
+        "--translate",
+        action="store_true",
         help="Translate to English instead of transcribing",
     )
     p.add_argument(
-        "--multilingual", action="store_true",
+        "--multilingual",
+        action="store_true",
         help="Enable multilingual/code-switching mode (helps smaller models)",
     )
     p.add_argument(
-        "--hf-token", default=None, metavar="TOKEN",
+        "--hf-token",
+        default=None,
+        metavar="TOKEN",
         help="HuggingFace token for private models and diarization (overrides cached token)",
     )
     p.add_argument(
-        "--model-dir", default=None, metavar="PATH",
+        "--model-dir",
+        default=None,
+        metavar="PATH",
         help="Custom directory for model cache (default: ~/.cache/huggingface/hub)",
     )
 
     # --- Output format ---
     p.add_argument(
-        "-f", "--format", default="text",
+        "-f",
+        "--format",
+        default="text",
         help="Output format (default: text). "
-             "Accepts one or a comma-separated list of: "
-             "text, json, srt, vtt, tsv, csv, lrc, html, ass, ttml. "
-             "Example: --format srt,text",
+        "Accepts one or a comma-separated list of: "
+        "text, json, srt, vtt, tsv, csv, lrc, html, ass, ttml. "
+        "Example: --format srt,text",
     )
     p.add_argument(
-        "--word-timestamps", action="store_true",
+        "--word-timestamps",
+        action="store_true",
         help="Include word-level timestamps (auto-enabled for --diarize)",
     )
     p.add_argument(
-        "--stream", action="store_true",
+        "--stream",
+        action="store_true",
         help="Output segments as they are transcribed (streaming mode; disables diarize/alignment)",
     )
     p.add_argument(
-        "--max-words-per-line", type=int, default=None, metavar="N",
+        "--max-words-per-line",
+        type=int,
+        default=None,
+        metavar="N",
         help="For SRT/VTT, split long segments into sub-cues with at most N words each "
-             "(requires word-level timestamps; falls back to full segment if no word data)",
+        "(requires word-level timestamps; falls back to full segment if no word data)",
     )
     p.add_argument(
-        "--max-chars-per-line", type=int, default=None, metavar="N",
+        "--max-chars-per-line",
+        type=int,
+        default=None,
+        metavar="N",
         help="For SRT/VTT/ASS/TTML, split subtitle lines so each fits within N characters "
-             "(requires word-level timestamps; takes priority over --max-words-per-line)",
+        "(requires word-level timestamps; takes priority over --max-words-per-line)",
     )
     p.add_argument(
-        "--channel", default="mix", choices=["left", "right", "mix"],
+        "--channel",
+        default="mix",
+        choices=["left", "right", "mix"],
         help="Stereo channel to transcribe: left, right, or mix (default: mix). "
-             "Requires ffmpeg.",
+        "Requires ffmpeg.",
     )
     p.add_argument(
-        "--clean-filler", action="store_true",
+        "--clean-filler",
+        action="store_true",
         help="Remove hesitation fillers (um, uh, er, ah, hmm) and discourse markers "
-             "(you know, I mean, you see) from transcript text",
+        "(you know, I mean, you see) from transcript text",
     )
     p.add_argument(
-        "--detect-paragraphs", action="store_true",
+        "--detect-paragraphs",
+        action="store_true",
         help="Insert paragraph breaks in text output based on silence gaps between segments",
     )
     p.add_argument(
-        "--paragraph-gap", type=float, default=3.0, metavar="SEC",
+        "--paragraph-gap",
+        type=float,
+        default=3.0,
+        metavar="SEC",
         help="Minimum silence gap in seconds to start a new paragraph (default: 3.0). "
-             "Used with --detect-paragraphs",
+        "Used with --detect-paragraphs",
     )
     p.add_argument(
-        "--merge-sentences", action="store_true",
+        "--merge-sentences",
+        action="store_true",
         help="Merge consecutive segments into sentence-level chunks "
-             "(useful for improving SRT/VTT readability)",
+        "(useful for improving SRT/VTT readability)",
     )
     p.add_argument(
-        "-o", "--output", default=None, metavar="PATH",
+        "-o",
+        "--output",
+        default=None,
+        metavar="PATH",
         help="Output file or directory (directory for batch mode)",
     )
     p.add_argument(
-        "--output-template", default=None, metavar="TEMPLATE",
+        "--output-template",
+        default=None,
+        metavar="TEMPLATE",
         help="Output filename template for batch mode. Supports: "
-             "{stem} (input filename without ext), {lang} (detected language), "
-             "{ext} (format extension), {model} (model name). "
-             "Example: '{stem}_{lang}.{ext}' → 'interview_en.srt'",
+        "{stem} (input filename without ext), {lang} (detected language), "
+        "{ext} (format extension), {model} (model name). "
+        "Example: '{stem}_{lang}.{ext}' → 'interview_en.srt'",
     )
 
     # --- Inference tuning ---
     p.add_argument(
-        "--beam-size", type=int, default=5, metavar="N",
+        "--beam-size",
+        type=int,
+        default=5,
+        metavar="N",
         help="Beam search size (default: 5)",
     )
     p.add_argument(
-        "--temperature", default=None, metavar="T",
+        "--temperature",
+        default=None,
+        metavar="T",
         help="Sampling temperature or comma-separated fallback list (e.g. '0.0' or '0.0,0.2,0.4'); "
-             "default uses faster-whisper's built-in schedule [0.0,0.2,0.4,0.6,0.8,1.0]",
+        "default uses faster-whisper's built-in schedule [0.0,0.2,0.4,0.6,0.8,1.0]",
     )
     p.add_argument(
-        "--no-speech-threshold", type=float, default=None, metavar="PROB",
+        "--no-speech-threshold",
+        type=float,
+        default=None,
+        metavar="PROB",
         help="Probability threshold below which segments are treated as silence/no-speech "
-             "(default: 0.6)",
+        "(default: 0.6)",
     )
     p.add_argument(
-        "--batch-size", type=int, default=8, metavar="N",
+        "--batch-size",
+        type=int,
+        default=8,
+        metavar="N",
         help="Batch size for batched inference (default: 8; reduce if OOM)",
     )
-    p.add_argument("--no-vad", action="store_true",
-                    help="Disable voice activity detection")
+    p.add_argument("--no-vad", action="store_true", help="Disable voice activity detection")
     p.add_argument(
-        "--vad-threshold", type=float, default=None, metavar="T",
+        "--vad-threshold",
+        type=float,
+        default=None,
+        metavar="T",
         help="VAD speech probability threshold (default: 0.5); higher = more conservative",
     )
     p.add_argument(
-        "--vad-neg-threshold", type=float, default=None, metavar="T",
+        "--vad-neg-threshold",
+        type=float,
+        default=None,
+        metavar="T",
         help="VAD negative threshold for ending speech segments (default: auto)",
     )
     p.add_argument(
-        "--vad-onset", type=float, default=None, metavar="T",
+        "--vad-onset",
+        type=float,
+        default=None,
+        metavar="T",
         help="Alias for --vad-threshold (legacy compatibility)",
     )
     p.add_argument(
-        "--vad-offset", type=float, default=None, metavar="T",
+        "--vad-offset",
+        type=float,
+        default=None,
+        metavar="T",
         help="Alias for --vad-neg-threshold (legacy compatibility)",
     )
     p.add_argument(
-        "--min-speech-duration", type=int, default=None, metavar="MS",
+        "--min-speech-duration",
+        type=int,
+        default=None,
+        metavar="MS",
         help="Minimum speech segment duration in milliseconds (default: 0)",
     )
     p.add_argument(
-        "--max-speech-duration", type=float, default=None, metavar="SEC",
+        "--max-speech-duration",
+        type=float,
+        default=None,
+        metavar="SEC",
         help="Maximum speech segment duration in seconds (default: unlimited)",
     )
     p.add_argument(
-        "--min-silence-duration", type=int, default=None, metavar="MS",
+        "--min-silence-duration",
+        type=int,
+        default=None,
+        metavar="MS",
         help="Minimum silence duration before splitting a segment in ms (default: 2000)",
     )
     p.add_argument(
-        "--speech-pad", type=int, default=None, metavar="MS",
+        "--speech-pad",
+        type=int,
+        default=None,
+        metavar="MS",
         help="Padding added around speech segments in milliseconds (default: 400)",
     )
-    p.add_argument("--no-batch", action="store_true",
-                    help="Disable batched inference (use standard WhisperModel)")
     p.add_argument(
-        "--hallucination-silence-threshold", type=float, default=None, metavar="SEC",
+        "--no-batch",
+        action="store_true",
+        help="Disable batched inference (use standard WhisperModel)",
+    )
+    p.add_argument(
+        "--hallucination-silence-threshold",
+        type=float,
+        default=None,
+        metavar="SEC",
         help="Skip silent sections where model hallucinates (e.g. 1.0 sec)",
     )
     p.add_argument(
-        "--no-condition-on-previous-text", action="store_true",
+        "--no-condition-on-previous-text",
+        action="store_true",
         help="Don't condition on previous text (reduces repetition/hallucination loops; auto-enabled for distil models)",
     )
     p.add_argument(
-        "--condition-on-previous-text", action="store_true",
+        "--condition-on-previous-text",
+        action="store_true",
         help="Force-enable conditioning on previous text (overrides auto-disable for distil models)",
     )
     p.add_argument(
-        "--compression-ratio-threshold", type=float, default=None, metavar="RATIO",
+        "--compression-ratio-threshold",
+        type=float,
+        default=None,
+        metavar="RATIO",
         help="Filter segments above this compression ratio (default: 2.4)",
     )
     p.add_argument(
-        "--log-prob-threshold", type=float, default=None, metavar="PROB",
+        "--log-prob-threshold",
+        type=float,
+        default=None,
+        metavar="PROB",
         help="Filter segments below this avg log probability (default: -1.0)",
     )
     p.add_argument(
-        "--max-new-tokens", type=int, default=None, metavar="N",
+        "--max-new-tokens",
+        type=int,
+        default=None,
+        metavar="N",
         help="Maximum tokens per segment (prevents runaway generation)",
     )
     p.add_argument(
-        "--clip-timestamps", default=None, metavar="RANGE",
+        "--clip-timestamps",
+        default=None,
+        metavar="RANGE",
         help="Transcribe specific time ranges: '30,60' or '0,30;60,90' (seconds)",
     )
     p.add_argument(
-        "--progress", action="store_true",
+        "--progress",
+        action="store_true",
         help="Show transcription progress bar",
     )
     p.add_argument(
-        "--best-of", type=int, default=None, metavar="N",
+        "--best-of",
+        type=int,
+        default=None,
+        metavar="N",
         help="Number of candidates when sampling with non-zero temperature (default: 5)",
     )
     p.add_argument(
-        "--patience", type=float, default=None, metavar="F",
+        "--patience",
+        type=float,
+        default=None,
+        metavar="F",
         help="Beam search patience factor; higher allows more beam candidates (default: 1.0)",
     )
     p.add_argument(
-        "--repetition-penalty", type=float, default=None, metavar="F",
+        "--repetition-penalty",
+        type=float,
+        default=None,
+        metavar="F",
         help="Penalty applied to previously generated tokens to reduce repetition (default: 1.0)",
     )
     p.add_argument(
-        "--no-repeat-ngram-size", type=int, default=None, metavar="N",
+        "--no-repeat-ngram-size",
+        type=int,
+        default=None,
+        metavar="N",
         help="Prevent repetition of n-grams of this size (default: 0 = disabled)",
     )
 
     # --- Advanced inference tuning ---
     p.add_argument(
-        "--no-timestamps", action="store_true",
+        "--no-timestamps",
+        action="store_true",
         help="Output text segments without timing information (faster; "
-             "incompatible with --word-timestamps, --format srt/vtt/tsv, --diarize)",
+        "incompatible with --word-timestamps, --format srt/vtt/tsv, --diarize)",
     )
     p.add_argument(
-        "--chunk-length", type=int, default=None, metavar="N",
+        "--chunk-length",
+        type=int,
+        default=None,
+        metavar="N",
         help="Audio chunk length in seconds for batched inference (default: auto); "
-             "ignored with --no-batch",
+        "ignored with --no-batch",
     )
     p.add_argument(
-        "--language-detection-threshold", type=float, default=None, metavar="T",
+        "--language-detection-threshold",
+        type=float,
+        default=None,
+        metavar="T",
         help="Confidence threshold for automatic language detection (default: 0.5)",
     )
     p.add_argument(
-        "--language-detection-segments", type=int, default=None, metavar="N",
+        "--language-detection-segments",
+        type=int,
+        default=None,
+        metavar="N",
         help="Number of audio segments to sample for language detection "
-             "(default: 1; increase for more accurate detection)",
+        "(default: 1; increase for more accurate detection)",
     )
     p.add_argument(
-        "--length-penalty", type=float, default=None, metavar="F",
+        "--length-penalty",
+        type=float,
+        default=None,
+        metavar="F",
         help="Length penalty for beam search; >1 favors longer outputs, <1 favors shorter "
-             "(default: 1.0)",
+        "(default: 1.0)",
     )
     p.add_argument(
-        "--prompt-reset-on-temperature", type=float, default=None, metavar="T",
+        "--prompt-reset-on-temperature",
+        type=float,
+        default=None,
+        metavar="T",
         help="Reset initial prompt when temperature fallback reaches this threshold (default: 0.5)",
     )
     p.add_argument(
-        "--no-suppress-blank", action="store_true",
+        "--no-suppress-blank",
+        action="store_true",
         help="Disable blank token suppression (may improve transcription of soft speech)",
     )
     p.add_argument(
-        "--suppress-tokens", default=None, metavar="IDS",
+        "--suppress-tokens",
+        default=None,
+        metavar="IDS",
         help="Comma-separated token IDs to suppress in addition to the default -1 "
-             "(e.g. '1234,5678')",
+        "(e.g. '1234,5678')",
     )
     p.add_argument(
-        "--max-initial-timestamp", type=float, default=None, metavar="T",
+        "--max-initial-timestamp",
+        type=float,
+        default=None,
+        metavar="T",
         help="Maximum timestamp allowed for the first transcribed segment in seconds "
-             "(default: 1.0)",
+        "(default: 1.0)",
     )
     p.add_argument(
-        "--prepend-punctuations", default=None, metavar="CHARS",
-        help="Punctuation characters to merge into the preceding word "
-             "(default: \"'¿([{-\")",
+        "--prepend-punctuations",
+        default=None,
+        metavar="CHARS",
+        help='Punctuation characters to merge into the preceding word (default: "\'¿([{-")',
     )
     p.add_argument(
-        "--append-punctuations", default=None, metavar="CHARS",
+        "--append-punctuations",
+        default=None,
+        metavar="CHARS",
         help="Punctuation characters to merge into the following word "
-             "(default: \"'.。,，!！?？:：\")]}\、\")",
+        '(default: "\'.。,，!！?？:：")]}\、")',
     )
 
     # --- Advanced features ---
     p.add_argument(
-        "--diarize", action="store_true",
+        "--diarize",
+        action="store_true",
         help="Speaker diarization (requires pyannote.audio; install via setup.sh --diarize)",
     )
     p.add_argument(
-        "--min-speakers", type=int, default=None, metavar="N",
+        "--min-speakers",
+        type=int,
+        default=None,
+        metavar="N",
         help="Minimum number of speakers hint for diarization",
     )
     p.add_argument(
-        "--max-speakers", type=int, default=None, metavar="N",
+        "--max-speakers",
+        type=int,
+        default=None,
+        metavar="N",
         help="Maximum number of speakers hint for diarization",
     )
     p.add_argument(
-        "--min-confidence", type=float, default=None, metavar="PROB",
+        "--min-confidence",
+        type=float,
+        default=None,
+        metavar="PROB",
         help="Drop segments below this avg word confidence (0.0–1.0)",
     )
     p.add_argument(
-        "--skip-existing", action="store_true",
+        "--skip-existing",
+        action="store_true",
         help="Skip files whose output already exists (batch mode)",
     )
     p.add_argument(
-        "--detect-language-only", action="store_true",
+        "--detect-language-only",
+        action="store_true",
         help="Detect the language of the audio and exit (no transcription). "
-             "Output: 'Language: en (probability: 0.984)'. With --format json: JSON object.",
+        "Output: 'Language: en (probability: 0.984)'. With --format json: JSON object.",
     )
     p.add_argument(
-        "--stats-file", default=None, metavar="PATH",
+        "--stats-file",
+        default=None,
+        metavar="PATH",
         help="Write performance stats JSON sidecar after transcription. "
-             "If a directory: writes {stem}.stats.json in that dir. "
-             "In batch mode, one stats file per input.",
+        "If a directory: writes {stem}.stats.json in that dir. "
+        "In batch mode, one stats file per input.",
     )
     p.add_argument(
-        "--burn-in", default=None, metavar="OUTPUT",
+        "--burn-in",
+        default=None,
+        metavar="OUTPUT",
         help="Burn subtitles into the original video: transcribe, then ffmpeg-overlay SRT "
-             "into the input file and save to OUTPUT (single-file mode only; requires ffmpeg)",
+        "into the input file and save to OUTPUT (single-file mode only; requires ffmpeg)",
     )
     p.add_argument(
-        "--speaker-names", default=None, metavar="NAMES",
+        "--speaker-names",
+        default=None,
+        metavar="NAMES",
         help="Comma-separated speaker names to replace SPEAKER_1, SPEAKER_2, etc. "
-             "(e.g. 'Alice,Bob'). Requires --diarize",
+        "(e.g. 'Alice,Bob'). Requires --diarize",
     )
     p.add_argument(
-        "--filter-hallucinations", action="store_true",
+        "--filter-hallucinations",
+        action="store_true",
         help="Filter common Whisper hallucinations: music/applause markers, "
-             "'Thank you for watching', duplicate consecutive segments, etc.",
+        "'Thank you for watching', duplicate consecutive segments, etc.",
     )
     p.add_argument(
-        "--keep-temp", action="store_true",
+        "--keep-temp",
+        action="store_true",
         help="Keep temp files from URL downloads instead of deleting them "
-             "(useful for re-processing downloaded audio without re-downloading)",
+        "(useful for re-processing downloaded audio without re-downloading)",
     )
     p.add_argument(
-        "--parallel", type=int, default=None, metavar="N",
+        "--parallel",
+        type=int,
+        default=None,
+        metavar="N",
         help="Number of parallel workers for batch processing "
-             "(default: sequential; mainly useful on CPU with many small files)",
+        "(default: sequential; mainly useful on CPU with many small files)",
     )
 
     # --- Preprocessing ---
     p.add_argument(
-        "--normalize", action="store_true",
+        "--normalize",
+        action="store_true",
         help="Normalize audio volume before transcription (EBU R128 loudnorm)",
     )
     p.add_argument(
-        "--denoise", action="store_true",
+        "--denoise",
+        action="store_true",
         help="Apply noise reduction before transcription (high-pass + FFT denoise)",
     )
 
     # --- Device ---
     p.add_argument(
-        "--device", default="auto", choices=["auto", "cpu", "cuda"],
+        "--device",
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
         help="Compute device (default: auto)",
     )
     p.add_argument(
-        "--compute-type", default="auto",
+        "--compute-type",
+        default="auto",
         choices=["auto", "int8", "int8_float16", "float16", "float32"],
         help="Quantization (default: auto; int8_float16 = hybrid for GPU)",
     )
     p.add_argument(
-        "--threads", type=int, default=None, metavar="N",
+        "--threads",
+        type=int,
+        default=None,
+        metavar="N",
         help="Number of CPU threads for CTranslate2 inference (default: auto)",
     )
     p.add_argument(
-        "-q", "--quiet", action="store_true",
+        "-q",
+        "--quiet",
+        action="store_true",
         help="Suppress progress messages",
     )
     p.add_argument(
-        "--agent", action="store_true",
+        "--agent",
+        action="store_true",
         help="Agent/chatbot output mode: emit a single compact JSON line to stdout "
-             "with text, duration, language, speakers, and stats. Implies --quiet. "
-             "File output (-o) still works alongside --agent.",
+        "with text, duration, language, speakers, and stats. Implies --quiet. "
+        "File output (-o) still works alongside --agent.",
     )
     p.add_argument(
-        "--log-level", default="warning",
+        "--log-level",
+        default="warning",
         choices=["debug", "info", "warning", "error"],
         help="Set faster_whisper library logging level (default: warning)",
     )
 
     # --- Utility ---
     p.add_argument(
-        "--version", action="store_true",
+        "--version",
+        action="store_true",
         help="Show installed faster-whisper version and exit",
     )
     p.add_argument(
-        "--update", action="store_true",
+        "--update",
+        action="store_true",
         help="Upgrade faster-whisper in the skill venv and exit",
     )
 
     # --- RSS / Podcast ---
     p.add_argument(
-        "--rss", default=None, metavar="URL",
+        "--rss",
+        default=None,
+        metavar="URL",
         help="Podcast RSS feed URL — extracts audio enclosures and transcribes them. "
-             "AUDIO positional is optional when --rss is used.",
+        "AUDIO positional is optional when --rss is used.",
     )
     p.add_argument(
-        "--rss-latest", type=int, default=5, metavar="N",
+        "--rss-latest",
+        type=int,
+        default=5,
+        metavar="N",
         help="Number of most-recent episodes to process from --rss feed "
-             "(default: 5; use 0 for all episodes)",
+        "(default: 5; use 0 for all episodes)",
     )
 
     # --- Reliability ---
     p.add_argument(
-        "--retries", type=int, default=0, metavar="N",
+        "--retries",
+        type=int,
+        default=0,
+        metavar="N",
         help="Retry failed files up to N times with exponential backoff "
-             "(default: 0 = no retry; incompatible with --parallel)",
+        "(default: 0 = no retry; incompatible with --parallel)",
     )
     p.add_argument(
-        "--resume", default=None, metavar="PATH",
+        "--resume",
+        default=None,
+        metavar="PATH",
         help="Resume batch processing from a progress checkpoint file. "
-             "Skips already-completed files. Creates the file if it doesn't exist.",
+        "Skips already-completed files. Creates the file if it doesn't exist.",
     )
 
     # --- Transcript search ---
     p.add_argument(
-        "--search", default=None, metavar="TERM",
+        "--search",
+        default=None,
+        metavar="TERM",
         help="Search the transcript for TERM and print matching segments with timestamps. "
-             "Replaces the normal transcript output (use with -o to save search results to file).",
+        "Replaces the normal transcript output (use with -o to save search results to file).",
     )
     p.add_argument(
-        "--search-fuzzy", action="store_true",
+        "--search-fuzzy",
+        action="store_true",
         help="Use fuzzy/approximate matching with --search (useful for typos or partial words)",
     )
 
     # --- Chapter detection ---
     p.add_argument(
-        "--detect-chapters", action="store_true",
+        "--detect-chapters",
+        action="store_true",
         help="Detect chapter/section breaks from silence gaps between segments and print chapter markers.",
     )
     p.add_argument(
-        "--chapter-gap", type=float, default=8.0, metavar="SEC",
+        "--chapter-gap",
+        type=float,
+        default=8.0,
+        metavar="SEC",
         help="Minimum silence gap in seconds to start a new chapter (default: 8.0)",
     )
     p.add_argument(
-        "--chapters-file", default=None, metavar="PATH",
+        "--chapters-file",
+        default=None,
+        metavar="PATH",
         help="Write chapter markers to this file (default: print to stdout alongside transcript). "
-             "Format is controlled by --chapter-format.",
+        "Format is controlled by --chapter-format.",
     )
     p.add_argument(
-        "--chapter-format", default="youtube",
+        "--chapter-format",
+        default="youtube",
         choices=["youtube", "text", "json"],
         help="Chapter output format: youtube (M:SS Title), text (Title: HH:MM:SS), json (default: youtube)",
     )
 
     # --- Speaker audio export ---
     p.add_argument(
-        "--export-speakers", default=None, metavar="DIR",
+        "--export-speakers",
+        default=None,
+        metavar="DIR",
         help="After diarization, export each speaker's audio turns to separate WAV files in DIR. "
-             "Requires --diarize and ffmpeg.",
+        "Requires --diarize and ffmpeg.",
     )
 
     # --- Backward compat (hidden) ---
@@ -1162,7 +1400,11 @@ def main():
     # Prevents repetition loops inherent to distil model architecture.
     # Override with --condition-on-previous-text if you need the old behaviour.
     is_distil = args.model.lower().startswith("distil-")
-    if is_distil and not args.no_condition_on_previous_text and not args.condition_on_previous_text:
+    if (
+        is_distil
+        and not args.no_condition_on_previous_text
+        and not args.condition_on_previous_text
+    ):
         args.no_condition_on_previous_text = True
         if not args.quiet:
             print(
@@ -1181,11 +1423,17 @@ def main():
             print("⚠️  --stream disables --diarize (needs all segments)", file=sys.stderr)
             args.diarize = False
         if args.word_timestamps:
-            print("⚠️  --stream disables word-level alignment (needs all segments)", file=sys.stderr)
+            print(
+                "⚠️  --stream disables word-level alignment (needs all segments)",
+                file=sys.stderr,
+            )
 
     # Conflict check: --chunk-length requires batched mode
     if args.chunk_length is not None and args.no_batch:
-        print("⚠️  --chunk-length ignored with --no-batch (only valid for batched inference)", file=sys.stderr)
+        print(
+            "⚠️  --chunk-length ignored with --no-batch (only valid for batched inference)",
+            file=sys.stderr,
+        )
         args.chunk_length = None
 
     # ---- Resolve inputs (including stdin '-') ----
@@ -1208,7 +1456,10 @@ def main():
     # Check for stdin '-' usage
     if "-" in raw_inputs:
         if len(raw_inputs) > 1:
-            print("Error: stdin '-' cannot be combined with other inputs in batch mode", file=sys.stderr)
+            print(
+                "Error: stdin '-' cannot be combined with other inputs in batch mode",
+                file=sys.stderr,
+            )
             sys.exit(EXIT_BAD_INPUT)
         if not args.quiet:
             print("📥 Reading audio from stdin...", file=sys.stderr)
@@ -1245,16 +1496,23 @@ def main():
         device = "cuda" if cuda_ok else "cpu"
         if device == "cpu" and not args.quiet:
             print("⚠️  CUDA not available — using CPU (this will be slow!)", file=sys.stderr)
-            print("   To enable GPU: pip install torch --index-url https://download.pytorch.org/whl/cu121", file=sys.stderr)
+            print(
+                "   To enable GPU: pip install torch --index-url https://download.pytorch.org/whl/cu121",
+                file=sys.stderr,
+            )
 
     if compute_type == "auto":
         compute_type = "float16" if device == "cuda" else "int8"
 
     if cuda_ok and compute_type == "float16" and args.compute_type == "auto" and not args.quiet:
         import re as _re
+
         gpu_name = gpu_name or ""
         if _re.search(r"RTX 30[0-9]{2}", gpu_name, _re.IGNORECASE):
-            print(f"💡 Tip: For {gpu_name}, --compute-type int8_float16 saves ~1GB VRAM with minimal quality loss", file=sys.stderr)
+            print(
+                f"💡 Tip: For {gpu_name}, --compute-type int8_float16 saves ~1GB VRAM with minimal quality loss",
+                file=sys.stderr,
+            )
 
     use_batched = not args.no_batch
 
@@ -1263,19 +1521,26 @@ def main():
         gpu_str = f" on {gpu_name}" if device == "cuda" and gpu_name else ""
         task_str = " [translate→en]" if args.translate else ""
         stream_str = " [streaming]" if args.stream else ""
-        print(f"🎙️  {args.model} ({device}/{compute_type}){gpu_str} [{mode}]{task_str}{stream_str}", file=sys.stderr)
+        print(
+            f"🎙️  {args.model} ({device}/{compute_type}){gpu_str} [{mode}]{task_str}{stream_str}",
+            file=sys.stderr,
+        )
         if is_batch:
             print(f"📁 {len(audio_files)} files queued", file=sys.stderr)
 
     # ---- Warn about batch stem collisions ----
     if is_batch and args.output:
         from collections import Counter
+
         _stems = Counter(Path(f).stem for f in audio_files)
         _dupes = {s: c for s, c in _stems.items() if c > 1}
         if _dupes and not args.quiet:
             _dup_names = ", ".join(f"{s} ({c}×)" for s, c in _dupes.items())
-            print(f"⚠️  Batch stem collision: {_dup_names} — later files will overwrite earlier ones. "
-                  f"Use --output-template '{{stem}}_{{lang}}.{{ext}}' to differentiate.", file=sys.stderr)
+            print(
+                f"⚠️  Batch stem collision: {_dup_names} — later files will overwrite earlier ones. "
+                f"Use --output-template '{{stem}}_{{lang}}.{{ext}}' to differentiate.",
+                file=sys.stderr,
+            )
 
     # ---- Load model ----
     try:
@@ -1305,11 +1570,24 @@ def main():
             try:
                 from faster_whisper import decode_audio
             except ImportError:
+
                 def decode_audio(path, sampling_rate=16000):
-                    import numpy as np
                     import subprocess as _sp
-                    cmd = ["ffmpeg", "-i", path, "-ar", str(sampling_rate), "-ac", "1",
-                           "-f", "f32le", "-"]
+
+                    import numpy as np
+
+                    cmd = [
+                        "ffmpeg",
+                        "-i",
+                        path,
+                        "-ar",
+                        str(sampling_rate),
+                        "-ac",
+                        "1",
+                        "-f",
+                        "f32le",
+                        "-",
+                    ]
                     result = _sp.run(cmd, capture_output=True, check=True)
                     return np.frombuffer(result.stdout, dtype=np.float32)
 
@@ -1320,7 +1598,12 @@ def main():
                 lang, lang_prob, _ = model.detect_language(audio=audio_np)
                 prob_val = float(lang_prob)
                 if args.format == "json":
-                    print(json.dumps({"language": lang, "language_probability": round(prob_val, 4)}, ensure_ascii=False))
+                    print(
+                        json.dumps(
+                            {"language": lang, "language_probability": round(prob_val, 4)},
+                            ensure_ascii=False,
+                        )
+                    )
                 else:
                     print(f"Language: {lang} (probability: {prob_val:.3f})")
             except Exception as e:
@@ -1340,7 +1623,10 @@ def main():
         progress_path = args.resume
         progress = load_progress(progress_path)
         if progress["completed"] and not args.quiet:
-            print(f"📋 Resuming: {len(progress['completed'])} file(s) already done", file=sys.stderr)
+            print(
+                f"📋 Resuming: {len(progress['completed'])} file(s) already done",
+                file=sys.stderr,
+            )
 
     # ---- Transcribe ----
     results = []
@@ -1376,7 +1662,7 @@ def main():
     if getattr(args, "parallel", None) and args.parallel > 1 and is_batch:
         if device == "cuda" and not args.quiet:
             print(
-                f"⚠️  --parallel on GPU: each call uses the full GPU; "
+                "⚠️  --parallel on GPU: each call uses the full GPU; "
                 "benefit is limited vs sequential batched mode",
                 file=sys.stderr,
             )
@@ -1394,8 +1680,7 @@ def main():
                 return args
 
             future_to_path = {
-                executor.submit(transcribe_file, af, pipe, _make_args(af)): af
-                for af in pending
+                executor.submit(transcribe_file, af, pipe, _make_args(af)): af for af in pending
             }
             for future in as_completed(future_to_path):
                 af = future_to_path[future]
@@ -1485,17 +1770,26 @@ def main():
                 files_done += 1  # count failed files too for accurate ETA
                 # Save failed files to progress
                 if progress is not None and progress_path:
-                    progress["failed"].append({
-                        "path": os.path.abspath(audio_path),
-                        "error": str(last_error),
-                    })
+                    progress["failed"].append(
+                        {
+                            "path": os.path.abspath(audio_path),
+                            "error": str(last_error),
+                        }
+                    )
                     save_progress(progress_path, progress)
                 if not is_batch:
                     err_msg = str(last_error).lower()
-                    if any(k in err_msg for k in (
-                        "format not recognised", "invalid data", "no backend",
-                        "failed to open", "not found", "bad input",
-                    )):
+                    if any(
+                        k in err_msg
+                        for k in (
+                            "format not recognised",
+                            "invalid data",
+                            "no backend",
+                            "failed to open",
+                            "not found",
+                            "bad input",
+                        )
+                    ):
                         sys.exit(EXIT_BAD_INPUT)
                     elif "out of memory" in err_msg or "oom" in err_msg:
                         sys.exit(EXIT_GPU_ERROR)
@@ -1539,8 +1833,10 @@ def main():
             else:
                 audio_src = r.get("_audio_path", r["file"])
                 export_speakers_audio(
-                    audio_src, r.get("segments", []),
-                    args.export_speakers, quiet=args.quiet,
+                    audio_src,
+                    r.get("segments", []),
+                    args.export_speakers,
+                    quiet=args.quiet,
                 )
 
         # ---- Streaming mode already printed segments to stdout ----
@@ -1585,17 +1881,25 @@ def main():
                 for fmt in formats:
                     ext = EXT_MAP.get(fmt, ".txt").lstrip(".")
                     output = format_result(
-                        r, fmt,
+                        r,
+                        fmt,
                         max_words_per_line=args.max_words_per_line,
                         max_chars_per_line=getattr(args, "max_chars_per_line", None),
                     )
                     out_path = Path(args.output)
                     multi_fmt = len(formats) > 1
-                    if out_path.is_dir() or (is_batch and not out_path.suffix) or (multi_fmt and not out_path.suffix):
+                    if (
+                        out_path.is_dir()
+                        or (is_batch and not out_path.suffix)
+                        or (multi_fmt and not out_path.suffix)
+                    ):
                         out_path.mkdir(parents=True, exist_ok=True)
                         if args.output_template:
                             filename = args.output_template.format(
-                                stem=stem, lang=lang, ext=ext, model=model_name,
+                                stem=stem,
+                                lang=lang,
+                                ext=ext,
+                                model=model_name,
                             )
                             dest = out_path / filename
                         else:
@@ -1644,7 +1948,8 @@ def main():
             for fmt_idx, fmt in enumerate(formats):
                 ext = EXT_MAP.get(fmt, ".txt").lstrip(".")
                 output = format_result(
-                    r, fmt,
+                    r,
+                    fmt,
                     max_words_per_line=args.max_words_per_line,
                     max_chars_per_line=getattr(args, "max_chars_per_line", None),
                 )
@@ -1653,12 +1958,19 @@ def main():
                     out_path = Path(args.output)
                     # Treat as directory when: it's already a dir, OR batch mode, OR multiple formats requested
                     multi_fmt = len(formats) > 1
-                    if out_path.is_dir() or (is_batch and not out_path.suffix) or (multi_fmt and not out_path.suffix):
+                    if (
+                        out_path.is_dir()
+                        or (is_batch and not out_path.suffix)
+                        or (multi_fmt and not out_path.suffix)
+                    ):
                         out_path.mkdir(parents=True, exist_ok=True)
                         # Apply output template if provided
                         if args.output_template:
                             filename = args.output_template.format(
-                                stem=stem, lang=lang, ext=ext, model=model_name,
+                                stem=stem,
+                                lang=lang,
+                                ext=ext,
+                                model=model_name,
                             )
                             dest = out_path / filename
                         else:
@@ -1710,7 +2022,10 @@ def main():
         if getattr(args, "burn_in", None):
             if is_batch:
                 if not args.quiet:
-                    print("⚠️  --burn-in is only supported for single-file mode; skipping", file=sys.stderr)
+                    print(
+                        "⚠️  --burn-in is only supported for single-file mode; skipping",
+                        file=sys.stderr,
+                    )
             elif not r.get("segments"):
                 if not args.quiet:
                     print("⚠️  --burn-in skipped: no speech segments detected", file=sys.stderr)

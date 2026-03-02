@@ -9,6 +9,8 @@ EXIT_BAD_INPUT (3)   — Bad audio, unsupported format, file not found, invalid 
 EXIT_GPU_ERROR (4)   — GPU/VRAM error (OOM, CUDA not available when required)
 """
 
+from __future__ import annotations
+
 EXIT_OK = 0
 EXIT_GENERAL = 1
 EXIT_MISSING_DEP = 2

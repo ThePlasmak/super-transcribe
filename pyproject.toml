@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 96
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/backends/faster-whisper/transcribe.py" = ["E402", "E501"]
+"scripts/backends/parakeet/transcribe.py" = ["E402", "E501"]

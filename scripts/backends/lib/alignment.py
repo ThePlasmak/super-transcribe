@@ -4,8 +4,13 @@ Refines word timestamps using MMS (Massively Multilingual Speech) model.
 Works with any backend that produces word-level timestamps.
 """
 
+from __future__ import annotations
+
 import re
 import sys
+from typing import Any
+
+Segment = dict[str, Any]
 
 # Characters to strip before alignment (numbers, punctuation except apostrophe)
 _ALIGN_CLEAN = re.compile(r"[^a-z'\u00e0-\u00ff]")  # keep letters, ', accented
@@ -13,7 +18,9 @@ _ALIGN_CLEAN = re.compile(r"[^a-z'\u00e0-\u00ff]")  # keep letters, ', accented
 _align_cache = {}  # reuse model across files in batch mode
 
 
-def run_alignment(audio_path, segments, quiet=False):
+def run_alignment(
+    audio_path: str, segments: list[Segment], quiet: bool = False
+) -> list[Segment]:
     """Refine word timestamps using wav2vec2 forced alignment (MMS model).
 
     Tokenises each word into character-level token groups, concatenates
@@ -47,7 +54,7 @@ def run_alignment(audio_path, segments, quiet=False):
                 _align_cache["device"] = "cuda"
             else:
                 _align_cache["device"] = "cpu"
-        except Exception:
+        except (RuntimeError,):
             _align_cache["device"] = "cpu"
 
         _align_cache["model"] = model
@@ -98,7 +105,7 @@ def run_alignment(audio_path, segments, quiet=False):
                 if groups:
                     word_map.append((i, len(groups)))
                     all_groups.extend(groups)
-            except Exception:
+            except (RuntimeError, ValueError):
                 continue
 
         if not all_groups:
@@ -115,7 +122,7 @@ def run_alignment(audio_path, segments, quiet=False):
         try:
             # aligner expects List[List[int]], returns List[List[TokenSpan]]
             all_spans = aligner(seg_emission, all_groups)
-        except Exception:
+        except (RuntimeError, ValueError):
             continue
 
         if len(all_spans) != len(all_groups):

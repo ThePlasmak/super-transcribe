@@ -19,13 +19,14 @@ Features:
 - Subtitle burn-in
 """
 
-import sys
-import os
-import json
-import time
-import glob
+from __future__ import annotations
+
 import argparse
+import json
+import os
 import shutil
+import sys
+import time
 from pathlib import Path
 
 # Add shared lib to path
@@ -34,25 +35,44 @@ _LIB_DIR = _BACKEND_DIR.parent / "lib"
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR.parent))
 
-from lib.formatters import (
-    format_ts_vtt, format_duration, format_result,
-    to_srt, EXT_MAP, VALID_FORMATS,
-    format_agent_json,
-)
-from lib.exitcodes import EXIT_OK, EXIT_GENERAL, EXIT_MISSING_DEP, EXIT_BAD_INPUT, EXIT_GPU_ERROR
-from lib.postprocess import (
-    filter_hallucinations, remove_filler_words, detect_paragraphs,
-    merge_sentences, detect_chapters, format_chapters_output,
-    search_transcript, format_search_results,
-)
-from lib.audio import (
-    is_url, download_url, convert_to_wav, get_audio_duration,
-    preprocess_audio, extract_channel, resolve_inputs, AUDIO_EXTS,
-)
-from lib.speakers import apply_speaker_names, export_speakers_audio
-from lib.rss import fetch_rss_episodes
 from lib.alignment import run_alignment
-
+from lib.audio import (
+    convert_to_wav,
+    download_url,
+    extract_channel,
+    get_audio_duration,
+    is_url,
+    preprocess_audio,
+    resolve_inputs,
+)
+from lib.exitcodes import (
+    EXIT_BAD_INPUT,
+    EXIT_GENERAL,
+    EXIT_GPU_ERROR,
+    EXIT_MISSING_DEP,
+    EXIT_OK,
+)
+from lib.formatters import (
+    EXT_MAP,
+    VALID_FORMATS,
+    format_agent_json,
+    format_duration,
+    format_result,
+    format_ts_vtt,
+    to_srt,
+)
+from lib.postprocess import (
+    detect_chapters,
+    detect_paragraphs,
+    filter_hallucinations,
+    format_chapters_output,
+    format_search_results,
+    merge_sentences,
+    remove_filler_words,
+    search_transcript,
+)
+from lib.rss import fetch_rss_episodes
+from lib.speakers import apply_speaker_names, export_speakers_audio
 
 # ---------------------------------------------------------------------------
 # Model aliases (short names → full HuggingFace model paths)
@@ -115,9 +135,31 @@ CANARY_MODELS = {
 
 # Languages supported by Canary for translation
 CANARY_LANGUAGES = {
-    "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de",
-    "el", "hu", "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk",
-    "sl", "es", "sv", "ru", "uk",
+    "bg",
+    "hr",
+    "cs",
+    "da",
+    "nl",
+    "en",
+    "et",
+    "fi",
+    "fr",
+    "de",
+    "el",
+    "hu",
+    "it",
+    "lv",
+    "lt",
+    "mt",
+    "pl",
+    "pt",
+    "ro",
+    "sk",
+    "sl",
+    "es",
+    "sv",
+    "ru",
+    "uk",
 }
 
 
@@ -140,6 +182,7 @@ def detect_language_from_text(text):
     # Try langdetect first (optional dependency)
     try:
         from langdetect import detect_langs
+
         results = detect_langs(text)
         if results:
             best = results[0]
@@ -148,9 +191,9 @@ def detect_language_from_text(text):
         pass
 
     # Fallback: character-based heuristics for common scripts
-    cyrillic = sum(1 for c in text if '\u0400' <= c <= '\u04FF')
-    greek = sum(1 for c in text if '\u0370' <= c <= '\u03FF')
-    cjk = sum(1 for c in text if '\u3000' <= c <= '\u9FFF' or '\uF900' <= c <= '\uFAFF')
+    cyrillic = sum(1 for c in text if "\u0400" <= c <= "\u04ff")
+    greek = sum(1 for c in text if "\u0370" <= c <= "\u03ff")
+    cjk = sum(1 for c in text if "\u3000" <= c <= "\u9fff" or "\uf900" <= c <= "\ufaff")
     total = max(len(text), 1)
 
     if cyrillic / total > 0.3:
@@ -176,10 +219,12 @@ def detect_language_from_text(text):
 # CUDA check
 # ---------------------------------------------------------------------------
 
+
 def check_cuda_available():
     """Check if CUDA is available and return device info."""
     try:
         import torch
+
         if torch.cuda.is_available():
             return True, torch.cuda.get_device_name(0)
         return False, None
@@ -192,9 +237,31 @@ def check_cuda_available():
 # ---------------------------------------------------------------------------
 
 PARAKEET_V3_LANGUAGES = {
-    "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de",
-    "el", "hu", "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk",
-    "sl", "es", "sv", "ru", "uk",
+    "bg",
+    "hr",
+    "cs",
+    "da",
+    "nl",
+    "en",
+    "et",
+    "fi",
+    "fr",
+    "de",
+    "el",
+    "hu",
+    "it",
+    "lv",
+    "lt",
+    "mt",
+    "pl",
+    "pt",
+    "ro",
+    "sk",
+    "sl",
+    "es",
+    "sv",
+    "ru",
+    "uk",
 }
 
 _model_cache = {}
@@ -212,8 +279,7 @@ def load_model(model_name, device="auto", quiet=False):
         import nemo.collections.asr as nemo_asr
     except ImportError:
         print(
-            "Error: NeMo toolkit not installed.\n"
-            "  Run setup: ./setup.sh",
+            "Error: NeMo toolkit not installed.\n  Run setup: ./setup.sh",
             file=sys.stderr,
         )
         sys.exit(EXIT_MISSING_DEP)
@@ -232,6 +298,7 @@ def load_model(model_name, device="auto", quiet=False):
         sys.exit(EXIT_GENERAL)
 
     import torch
+
     cuda_ok = torch.cuda.is_available()
 
     if device == "auto":
@@ -242,7 +309,9 @@ def load_model(model_name, device="auto", quiet=False):
                 print(f"🚀 Using GPU: {gpu_name}", file=sys.stderr)
         else:
             if not quiet:
-                print("⚠️  CUDA not available — using CPU (this will be slower)", file=sys.stderr)
+                print(
+                    "⚠️  CUDA not available — using CPU (this will be slower)", file=sys.stderr
+                )
     elif device == "cuda":
         if not cuda_ok:
             print("Error: CUDA requested but not available", file=sys.stderr)
@@ -257,6 +326,7 @@ def load_model(model_name, device="auto", quiet=False):
 # ---------------------------------------------------------------------------
 # Canary translation
 # ---------------------------------------------------------------------------
+
 
 def transcribe_canary(audio_path, asr_model, args):
     """Transcribe or translate using a Canary model.
@@ -275,9 +345,7 @@ def transcribe_canary(audio_path, asr_model, args):
 
     channel = getattr(args, "channel", "mix")
     if channel != "mix":
-        effective_path, channel_tmp = extract_channel(
-            effective_path, channel, quiet=args.quiet
-        )
+        effective_path, channel_tmp = extract_channel(effective_path, channel, quiet=args.quiet)
 
     if getattr(args, "normalize", False) or getattr(args, "denoise", False):
         effective_path, preprocess_tmp = preprocess_audio(
@@ -305,7 +373,11 @@ def transcribe_canary(audio_path, asr_model, args):
 
     is_translate = getattr(args, "translate", False) or (source_lang != target_lang)
 
-    task_label = f"translate ({source_lang}→{target_lang})" if is_translate else f"transcribe ({source_lang})"
+    task_label = (
+        f"translate ({source_lang}→{target_lang})"
+        if is_translate
+        else f"transcribe ({source_lang})"
+    )
     if not args.quiet:
         print(f"🐤 Canary: {task_label}", file=sys.stderr)
 
@@ -356,9 +428,9 @@ def transcribe_canary(audio_path, asr_model, args):
             if words_all and segments:
                 for seg in segments:
                     seg_words = [
-                        w for w in words_all
-                        if w["start"] >= seg["start"] - 0.01
-                        and w["end"] <= seg["end"] + 0.01
+                        w
+                        for w in words_all
+                        if w["start"] >= seg["start"] - 0.01 and w["end"] <= seg["end"] + 0.01
                     ]
                     if seg_words:
                         seg["words"] = seg_words
@@ -370,7 +442,9 @@ def transcribe_canary(audio_path, asr_model, args):
     speakers = None
     if getattr(args, "diarize", False):
         segments, speakers = run_nemo_diarization(
-            effective_path, segments, quiet=args.quiet,
+            effective_path,
+            segments,
+            quiet=args.quiet,
             min_speakers=getattr(args, "min_speakers", None),
             max_speakers=getattr(args, "max_speakers", None),
         )
@@ -420,7 +494,10 @@ def transcribe_canary(audio_path, asr_model, args):
 # NeMo diarization
 # ---------------------------------------------------------------------------
 
-def run_nemo_diarization(audio_path, segments, quiet=False, min_speakers=None, max_speakers=None):
+
+def run_nemo_diarization(
+    audio_path, segments, quiet=False, min_speakers=None, max_speakers=None
+):
     """Assign speaker labels using NeMo's MSDD diarization pipeline.
 
     Uses NeMo's neural diarization with multi-scale diarization decoder (MSDD)
@@ -439,9 +516,11 @@ def run_nemo_diarization(audio_path, segments, quiet=False, min_speakers=None, m
         tmp_wav = audio_path + ".diarize.wav"
         try:
             import subprocess
+
             subprocess.run(
                 ["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", tmp_wav],
-                check=True, capture_output=True,
+                check=True,
+                capture_output=True,
             )
             diarize_path = tmp_wav
         except Exception:
@@ -451,9 +530,9 @@ def run_nemo_diarization(audio_path, segments, quiet=False, min_speakers=None, m
     try:
         # Try NeMo's offline diarization using the ClusteringDiarizer
         # which uses speaker embeddings + spectral clustering
-        from nemo.collections.asr.models import ClusteringDiarizer
         import tempfile
-        import yaml
+
+        from nemo.collections.asr.models import ClusteringDiarizer
 
         # Create a YAML config for the diarizer
         tmpdir = tempfile.mkdtemp(prefix="nemo-diar-")
@@ -537,6 +616,7 @@ def run_nemo_diarization(audio_path, segments, quiet=False, min_speakers=None, m
         # Run diarization — use struct=False to avoid OmegaConf rejecting
         # keys that NeMo adds internally during initialization
         from omegaconf import OmegaConf
+
         cfg = OmegaConf.create(diar_config)
         OmegaConf.set_struct(cfg, False)
         diarizer = ClusteringDiarizer(cfg=cfg)
@@ -562,11 +642,13 @@ def run_nemo_diarization(audio_path, segments, quiet=False, min_speakers=None, m
                         start = float(parts[3])
                         dur = float(parts[4])
                         speaker = parts[7]
-                        timeline.append({
-                            "start": start,
-                            "end": start + dur,
-                            "speaker": speaker,
-                        })
+                        timeline.append(
+                            {
+                                "start": start,
+                                "end": start + dur,
+                                "speaker": speaker,
+                            }
+                        )
 
     except ImportError as e:
         if not quiet:
@@ -632,13 +714,15 @@ def run_nemo_diarization(audio_path, segments, quiet=False, min_speakers=None, m
         def flush_group():
             if not current_words:
                 return
-            new_segments.append({
-                "start": current_words[0]["start"],
-                "end": current_words[-1]["end"],
-                "text": " ".join(w["word"].strip() for w in current_words),
-                "speaker": current_speaker,
-                "words": list(current_words),
-            })
+            new_segments.append(
+                {
+                    "start": current_words[0]["start"],
+                    "end": current_words[-1]["end"],
+                    "text": " ".join(w["word"].strip() for w in current_words),
+                    "speaker": current_speaker,
+                    "words": list(current_words),
+                }
+            )
 
         for w in all_words:
             sp = w.get("speaker")
@@ -678,6 +762,7 @@ def _run_pyannote_fallback(audio_path, quiet=False, min_speakers=None, max_speak
     except ImportError:
         # Auto-install pyannote.audio as fallback diarizer
         from lib.audio import auto_install_package
+
         if not auto_install_package("pyannote.audio", quiet=quiet):
             if not quiet:
                 print(
@@ -700,6 +785,7 @@ def _run_pyannote_fallback(audio_path, quiet=False, min_speakers=None, max_speak
 
     try:
         import torch
+
         if torch.cuda.is_available():
             pipeline.to(torch.device("cuda"))
     except Exception:
@@ -741,26 +827,32 @@ def _try_speaker_tagged_asr(audio_path, args, diar_model, mt_model, effective_pa
     audio extraction. Returns result dict or None if unavailable.
     """
     try:
-        from nemo.collections.asr.parts.utils.multispk_transcribe_utils import SpeakerTaggedASR
-        from nemo.collections.asr.parts.utils.streaming_utils import CacheAwareStreamingAudioBuffer
-        from omegaconf import OmegaConf
         import torch
+        from nemo.collections.asr.parts.utils.multispk_transcribe_utils import SpeakerTaggedASR
+        from nemo.collections.asr.parts.utils.streaming_utils import (
+            CacheAwareStreamingAudioBuffer,
+        )
+        from omegaconf import OmegaConf
     except ImportError:
         return None  # NeMo version doesn't have these utilities
 
     try:
         if not args.quiet:
-            print("🔊 Using NeMo SpeakerTaggedASR (speaker kernel injection)...", file=sys.stderr)
+            print(
+                "🔊 Using NeMo SpeakerTaggedASR (speaker kernel injection)...", file=sys.stderr
+            )
 
         # Build config for multitalker inference
         max_speakers = getattr(args, "max_speakers", None) or 4
-        cfg = OmegaConf.create({
-            "audio_file": os.path.abspath(effective_path),
-            "output_path": None,
-            "online_normalization": True,
-            "pad_and_drop_preencoded": True,
-            "max_speakers": max_speakers,
-        })
+        cfg = OmegaConf.create(
+            {
+                "audio_file": os.path.abspath(effective_path),
+                "output_path": None,
+                "online_normalization": True,
+                "pad_and_drop_preencoded": True,
+                "max_speakers": max_speakers,
+            }
+        )
 
         # Create streaming buffer
         streaming_buffer = CacheAwareStreamingAudioBuffer(
@@ -768,9 +860,7 @@ def _try_speaker_tagged_asr(audio_path, args, diar_model, mt_model, effective_pa
             online_normalization=cfg.online_normalization,
             pad_and_drop_preencoded=cfg.pad_and_drop_preencoded,
         )
-        streaming_buffer.append_audio_file(
-            audio_filepath=cfg.audio_file, stream_id=-1
-        )
+        streaming_buffer.append_audio_file(audio_filepath=cfg.audio_file, stream_id=-1)
         streaming_buffer_iter = iter(streaming_buffer)
 
         # Set up multitalker streamer
@@ -779,7 +869,8 @@ def _try_speaker_tagged_asr(audio_path, args, diar_model, mt_model, effective_pa
         # Process audio chunks
         for step_num, (chunk_audio, chunk_lengths) in enumerate(streaming_buffer_iter):
             drop_extra = (
-                0 if step_num == 0 and not cfg.pad_and_drop_preencoded
+                0
+                if step_num == 0 and not cfg.pad_and_drop_preencoded
                 else mt_model.encoder.streaming_cfg.drop_extra_pre_encoded
             )
             with torch.inference_mode():
@@ -813,7 +904,9 @@ def _try_speaker_tagged_asr(audio_path, args, diar_model, mt_model, effective_pa
 
             seg = {
                 "start": float(entry.get("start_time", entry.get("offset", 0))),
-                "end": float(entry.get("end_time", entry.get("offset", 0) + entry.get("duration", 0))),
+                "end": float(
+                    entry.get("end_time", entry.get("offset", 0) + entry.get("duration", 0))
+                ),
                 "text": entry.get("words", entry.get("text", "")),
                 "speaker": speaker_label,
             }
@@ -864,10 +957,14 @@ def transcribe_multitalker(audio_path, args):
         sys.exit(EXIT_GPU_ERROR)
 
     # Resolve model names (allow exact user overrides)
-    diar_model_name = getattr(args, "multitalker_diar_model", None) or \
-        "nvidia/diar_streaming_sortformer_4spk-v2.1"
-    mt_asr_model_name = getattr(args, "multitalker_asr_model", None) or \
-        "nvidia/multitalker-parakeet-streaming-0.6b-v1"
+    diar_model_name = (
+        getattr(args, "multitalker_diar_model", None)
+        or "nvidia/diar_streaming_sortformer_4spk-v2.1"
+    )
+    mt_asr_model_name = (
+        getattr(args, "multitalker_asr_model", None)
+        or "nvidia/multitalker-parakeet-streaming-0.6b-v1"
+    )
 
     # Preprocessing
     convert_tmp = None
@@ -877,9 +974,7 @@ def transcribe_multitalker(audio_path, args):
 
     channel = getattr(args, "channel", "mix")
     if channel != "mix":
-        effective_path, channel_tmp = extract_channel(
-            effective_path, channel, quiet=args.quiet
-        )
+        effective_path, channel_tmp = extract_channel(effective_path, channel, quiet=args.quiet)
 
     if getattr(args, "normalize", False) or getattr(args, "denoise", False):
         effective_path, preprocess_tmp = preprocess_audio(
@@ -899,9 +994,8 @@ def transcribe_multitalker(audio_path, args):
             print(f"📦 Loading diarizer: {diar_model_name}...", file=sys.stderr)
         try:
             from nemo.collections.asr.models import SortformerEncLabelModel
-            diar_model = SortformerEncLabelModel.from_pretrained(
-                diar_model_name
-            ).eval().cuda()
+
+            diar_model = SortformerEncLabelModel.from_pretrained(diar_model_name).eval().cuda()
             _multitalker_cache[cache_diar_key] = diar_model
         except ImportError as e:
             print(
@@ -914,7 +1008,11 @@ def transcribe_multitalker(audio_path, args):
             sys.exit(EXIT_MISSING_DEP)
         except Exception as e:
             err_msg = str(e).lower()
-            exit_code = EXIT_GPU_ERROR if ("out of memory" in err_msg or "oom" in err_msg) else EXIT_GENERAL
+            exit_code = (
+                EXIT_GPU_ERROR
+                if ("out of memory" in err_msg or "oom" in err_msg)
+                else EXIT_GENERAL
+            )
             print(
                 f"Error loading diarizer '{diar_model_name}': {e}",
                 file=sys.stderr,
@@ -929,21 +1027,23 @@ def transcribe_multitalker(audio_path, args):
             print(f"📦 Loading multitalker ASR: {mt_asr_model_name}...", file=sys.stderr)
         try:
             import nemo.collections.asr as nemo_asr
-            mt_model = nemo_asr.models.ASRModel.from_pretrained(
-                mt_asr_model_name
-            ).eval().cuda()
+
+            mt_model = nemo_asr.models.ASRModel.from_pretrained(mt_asr_model_name).eval().cuda()
             _multitalker_cache[cache_asr_key] = mt_model
         except ImportError as e:
             print(
-                f"Error: NeMo ASR not available: {e}\n"
-                "  pip install nemo_toolkit[asr]",
+                f"Error: NeMo ASR not available: {e}\n  pip install nemo_toolkit[asr]",
                 file=sys.stderr,
             )
             _cleanup_temps(convert_tmp, preprocess_tmp, channel_tmp)
             sys.exit(EXIT_MISSING_DEP)
         except Exception as e:
             err_msg = str(e).lower()
-            exit_code = EXIT_GPU_ERROR if ("out of memory" in err_msg or "oom" in err_msg) else EXIT_GENERAL
+            exit_code = (
+                EXIT_GPU_ERROR
+                if ("out of memory" in err_msg or "oom" in err_msg)
+                else EXIT_GENERAL
+            )
             print(
                 f"Error loading multitalker ASR model '{mt_asr_model_name}': {e}",
                 file=sys.stderr,
@@ -969,7 +1069,9 @@ def transcribe_multitalker(audio_path, args):
             all_segments = filter_hallucinations(all_segments)
 
         full_text = " ".join(
-            f"[{s.get('speaker', '')}] {s['text'].strip()}" if s.get("speaker") else s["text"].strip()
+            f"[{s.get('speaker', '')}] {s['text'].strip()}"
+            if s.get("speaker")
+            else s["text"].strip()
             for s in all_segments
         )
 
@@ -1002,8 +1104,9 @@ def transcribe_multitalker(audio_path, args):
         print("🔊 Running Sortformer diarization...", file=sys.stderr)
 
     # Step 1: Run diarization to get speaker activity
-    import tempfile
     import subprocess
+    import tempfile
+
     tmpdir = tempfile.mkdtemp(prefix="mt-diar-")
 
     try:
@@ -1016,32 +1119,36 @@ def transcribe_multitalker(audio_path, args):
             "label": "infer",
             "text": "-",
         }
-        max_speakers = getattr(args, "max_speakers", None) or 4
-        min_speakers = getattr(args, "min_speakers", None)
+        _max_speakers = getattr(args, "max_speakers", None) or 4  # noqa: F841
+        _min_speakers = getattr(args, "min_speakers", None)  # noqa: F841
 
         with open(manifest_path, "w") as f:
             import json as _json
+
             _json.dump(manifest_entry, f)
             f.write("\n")
 
         # Run Sortformer diarization
         from omegaconf import OmegaConf
-        diar_cfg = OmegaConf.create({
-            "manifest_filepath": manifest_path,
-            "out_dir": tmpdir,
-            "batch_size": 1,
-        })
+
+        _diar_cfg = OmegaConf.create(  # noqa: F841
+            {
+                "manifest_filepath": manifest_path,
+                "out_dir": tmpdir,
+                "batch_size": 1,
+            }
+        )
 
         try:
             # Sortformer returns per-frame speaker labels
-            diar_output = diar_model.diarize(
+            _diar_output = diar_model.diarize(  # noqa: F841
                 audio=[os.path.abspath(effective_path)],
                 batch_size=1,
             )
         except Exception:
             # Fallback: use the manifest-based approach
             try:
-                diar_output = diar_model.diarize(
+                _diar_output = diar_model.diarize(  # noqa: F841
                     manifest_filepath=manifest_path,
                     out_dir=tmpdir,
                     batch_size=1,
@@ -1072,18 +1179,24 @@ def transcribe_multitalker(audio_path, args):
                         start = float(parts[3])
                         dur = float(parts[4])
                         speaker = parts[7]
-                        timeline.append({
-                            "start": start,
-                            "end": start + dur,
-                            "speaker": speaker,
-                        })
+                        timeline.append(
+                            {
+                                "start": start,
+                                "end": start + dur,
+                                "speaker": speaker,
+                            }
+                        )
 
         if not timeline:
             if not args.quiet:
-                print("⚠️  No speakers detected — transcribing as single speaker", file=sys.stderr)
+                print(
+                    "⚠️  No speakers detected — transcribing as single speaker", file=sys.stderr
+                )
 
         # Step 2: Identify unique speakers and their segments
-        speakers_found = sorted(set(t["speaker"] for t in timeline)) if timeline else ["SPEAKER_0"]
+        speakers_found = (
+            sorted(set(t["speaker"] for t in timeline)) if timeline else ["SPEAKER_0"]
+        )
         if not args.quiet:
             print(f"   Found {len(speakers_found)} speaker(s)", file=sys.stderr)
 
@@ -1096,29 +1209,32 @@ def transcribe_multitalker(audio_path, args):
             speaker_map[speaker_id] = speaker_label
 
             # Get this speaker's active regions
-            sp_ranges = [
-                (t["start"], t["end"]) for t in timeline
-                if t["speaker"] == speaker_id
-            ]
+            sp_ranges = [(t["start"], t["end"]) for t in timeline if t["speaker"] == speaker_id]
 
             if not sp_ranges:
                 continue
 
             # Extract speaker audio using ffmpeg
             sp_audio = os.path.join(tmpdir, f"{speaker_label}.wav")
-            select_expr = "+".join(
-                f"between(t,{s:.3f},{e:.3f})" for s, e in sp_ranges
-            )
+            select_expr = "+".join(f"between(t,{s:.3f},{e:.3f})" for s, e in sp_ranges)
 
             try:
                 subprocess.run(
                     [
-                        "ffmpeg", "-y", "-i", effective_path,
-                        "-af", f"aselect='{select_expr}',asetpts=N/SR/TB",
-                        "-ar", "16000", "-ac", "1",
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        effective_path,
+                        "-af",
+                        f"aselect='{select_expr}',asetpts=N/SR/TB",
+                        "-ar",
+                        "16000",
+                        "-ac",
+                        "1",
                         sp_audio,
                     ],
-                    check=True, capture_output=True,
+                    check=True,
+                    capture_output=True,
                 )
             except subprocess.CalledProcessError:
                 if not args.quiet:
@@ -1127,7 +1243,10 @@ def transcribe_multitalker(audio_path, args):
 
             if not args.quiet:
                 total_dur = sum(e - s for s, e in sp_ranges)
-                print(f"   🎤 {speaker_label}: {len(sp_ranges)} segment(s), {format_duration(total_dur)}", file=sys.stderr)
+                print(
+                    f"   🎤 {speaker_label}: {len(sp_ranges)} segment(s), {format_duration(total_dur)}",
+                    file=sys.stderr,
+                )
 
             # Transcribe this speaker's audio
             try:
@@ -1168,7 +1287,8 @@ def transcribe_multitalker(audio_path, args):
                         # Map word timestamps too
                         if "word" in hyp.timestamp and hyp.timestamp["word"]:
                             seg_words = [
-                                w for w in hyp.timestamp["word"]
+                                w
+                                for w in hyp.timestamp["word"]
                                 if w["start"] >= seg_ts["start"] - 0.01
                                 and w["end"] <= seg_ts["end"] + 0.01
                             ]
@@ -1187,12 +1307,14 @@ def transcribe_multitalker(audio_path, args):
                 else:
                     # No timestamps — create a single segment per speaker range
                     for orig_start, orig_end in sp_ranges:
-                        all_segments.append({
-                            "start": orig_start,
-                            "end": orig_end,
-                            "text": sp_text,
-                            "speaker": speaker_label,
-                        })
+                        all_segments.append(
+                            {
+                                "start": orig_start,
+                                "end": orig_end,
+                                "text": sp_text,
+                                "speaker": speaker_label,
+                            }
+                        )
 
             except Exception as e:
                 if not args.quiet:
@@ -1212,7 +1334,9 @@ def transcribe_multitalker(audio_path, args):
 
         # Build full text
         full_text = " ".join(
-            f"[{s.get('speaker', '')}] {s['text'].strip()}" if s.get("speaker") else s["text"].strip()
+            f"[{s.get('speaker', '')}] {s['text'].strip()}"
+            if s.get("speaker")
+            else s["text"].strip()
             for s in all_segments
         )
 
@@ -1253,6 +1377,7 @@ def transcribe_multitalker(audio_path, args):
 # Batch resume support
 # ---------------------------------------------------------------------------
 
+
 def load_progress(progress_path):
     """Load batch progress checkpoint file."""
     if os.path.isfile(progress_path):
@@ -1277,6 +1402,7 @@ def save_progress(progress_path, progress):
 # Core transcription
 # ---------------------------------------------------------------------------
 
+
 def transcribe_file(audio_path, asr_model, args):
     """Transcribe a single audio file. Returns result dict."""
     t0 = time.time()
@@ -1290,9 +1416,7 @@ def transcribe_file(audio_path, asr_model, args):
     # Channel extraction
     channel = getattr(args, "channel", "mix")
     if channel != "mix":
-        effective_path, channel_tmp = extract_channel(
-            effective_path, channel, quiet=args.quiet
-        )
+        effective_path, channel_tmp = extract_channel(effective_path, channel, quiet=args.quiet)
 
     # Audio preprocessing (denoise/normalize)
     if getattr(args, "normalize", False) or getattr(args, "denoise", False):
@@ -1375,26 +1499,31 @@ def transcribe_file(audio_path, asr_model, args):
 
         if "word" in ts_data and ts_data["word"]:
             for word_ts in ts_data["word"]:
-                words_all.append({
-                    "word": word_ts.get("word", ""),
-                    "start": word_ts["start"],
-                    "end": word_ts["end"],
-                })
+                words_all.append(
+                    {
+                        "word": word_ts.get("word", ""),
+                        "start": word_ts["start"],
+                        "end": word_ts["end"],
+                    }
+                )
 
         chars_all = []
         if "char" in ts_data and ts_data["char"]:
             for char_ts in ts_data["char"]:
-                chars_all.append({
-                    "char": char_ts.get("char", ""),
-                    "start": char_ts["start"],
-                    "end": char_ts["end"],
-                })
+                chars_all.append(
+                    {
+                        "char": char_ts.get("char", ""),
+                        "start": char_ts["start"],
+                        "end": char_ts["end"],
+                    }
+                )
 
         # Attach words to segments
         if words_all and segments:
             for seg in segments:
                 seg_words = [
-                    w for w in words_all
+                    w
+                    for w in words_all
                     if w["start"] >= seg["start"] - 0.01 and w["end"] <= seg["end"] + 0.01
                 ]
                 if seg_words:
@@ -1404,21 +1533,29 @@ def transcribe_file(audio_path, asr_model, args):
 
     # If no segment timestamps, create a single segment from the full text
     if not segments and full_text.strip():
-        segments.append({
-            "start": 0.0,
-            "end": duration,
-            "text": full_text,
-        })
+        segments.append(
+            {
+                "start": 0.0,
+                "end": duration,
+                "text": full_text,
+            }
+        )
 
     # Refine word timestamps with wav2vec2 (before diarization so it benefits)
-    if words_all and not getattr(args, "streaming", False) and not getattr(args, "no_align", False):
+    if (
+        words_all
+        and not getattr(args, "streaming", False)
+        and not getattr(args, "no_align", False)
+    ):
         segments = run_alignment(effective_path, segments, quiet=args.quiet)
 
     # Diarization
     speakers = None
     if getattr(args, "diarize", False):
         segments, speakers = run_nemo_diarization(
-            effective_path, segments, quiet=args.quiet,
+            effective_path,
+            segments,
+            quiet=args.quiet,
             min_speakers=getattr(args, "min_speakers", None),
             max_speakers=getattr(args, "max_speakers", None),
         )
@@ -1493,6 +1630,7 @@ def _cleanup_temps(*temps):
 # Streaming transcription
 # ---------------------------------------------------------------------------
 
+
 def transcribe_file_streaming(audio_path, asr_model, args):
     """Transcribe a file using chunked inference, printing segments as they arrive."""
     t0 = time.time()
@@ -1530,11 +1668,13 @@ def transcribe_file_streaming(audio_path, asr_model, args):
     else:
         print(full_text.strip(), flush=True)
         if full_text.strip():
-            segments.append({
-                "start": 0.0,
-                "end": duration,
-                "text": full_text,
-            })
+            segments.append(
+                {
+                    "start": 0.0,
+                    "end": duration,
+                    "text": full_text,
+                }
+            )
 
     if convert_tmp and os.path.exists(convert_tmp):
         os.remove(convert_tmp)
@@ -1566,6 +1706,7 @@ def transcribe_file_streaming(audio_path, asr_model, args):
 # ---------------------------------------------------------------------------
 # Stats file writing
 # ---------------------------------------------------------------------------
+
 
 def _write_stats(r, args):
     """Write a JSON stats sidecar file if --stats-file is set."""
@@ -1609,6 +1750,7 @@ def _write_stats(r, args):
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def main():
     # Suppress NeMo's noisy logging by default
     os.environ.setdefault("NEMO_LOG_LEVEL", "ERROR")
@@ -1617,6 +1759,7 @@ def main():
     if "--version" in sys.argv:
         try:
             import importlib.metadata
+
             nemo_ver = importlib.metadata.version("nemo_toolkit")
         except Exception:
             nemo_ver = "unknown"
@@ -1634,270 +1777,356 @@ def main():
             "  %(prog)s *.wav --skip-existing -o ./transcripts/\n"
             "  %(prog)s long-lecture.wav --long-form\n"
             "  %(prog)s meeting.wav --diarize\n"
-            "  %(prog)s audio.mp3 --search \"keyword\"\n"
+            '  %(prog)s audio.mp3 --search "keyword"\n'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
     # --- Positional ---
     p.add_argument(
-        "audio", nargs="*", metavar="AUDIO",
+        "audio",
+        nargs="*",
+        metavar="AUDIO",
         help="Audio file(s), directory, glob pattern, or URL.",
     )
 
     # --- Model & language ---
     p.add_argument(
-        "-m", "--model", default="nvidia/parakeet-tdt-0.6b-v3",
+        "-m",
+        "--model",
+        default="nvidia/parakeet-tdt-0.6b-v3",
         help="NeMo model name or alias (default: nvidia/parakeet-tdt-0.6b-v3). "
-             "Aliases: tdt-v3, tdt-v2, 1.1b, 110m/fast/small, ja, vi, multitalker, "
-             "canary, canary-v2. Also accepts full HuggingFace model paths.",
+        "Aliases: tdt-v3, tdt-v2, 1.1b, 110m/fast/small, ja, vi, multitalker, "
+        "canary, canary-v2. Also accepts full HuggingFace model paths.",
     )
     p.add_argument(
-        "-l", "--language", default=None,
+        "-l",
+        "--language",
+        default=None,
         help="Expected language code, e.g. en, es, fr. "
-             "For ja/vi, auto-selects dedicated Parakeet model if default model is used.",
+        "For ja/vi, auto-selects dedicated Parakeet model if default model is used.",
     )
 
     # --- Translation (Canary) ---
     p.add_argument(
-        "--translate", action="store_true",
+        "--translate",
+        action="store_true",
         help="Translate speech to a different language using Canary model. "
-             "Auto-selects canary-1b-v2 if no Canary model is specified. "
-             "Use --source-lang and --target-lang to control language pair. "
-             "Supports 25 EU languages (bidirectional).",
+        "Auto-selects canary-1b-v2 if no Canary model is specified. "
+        "Use --source-lang and --target-lang to control language pair. "
+        "Supports 25 EU languages (bidirectional).",
     )
     p.add_argument(
-        "--source-lang", default=None, metavar="LANG",
+        "--source-lang",
+        default=None,
+        metavar="LANG",
         help="Source language for Canary translation (default: auto from -l or 'en'). "
-             "Example: --source-lang fr",
+        "Example: --source-lang fr",
     )
     p.add_argument(
-        "--target-lang", default=None, metavar="LANG",
+        "--target-lang",
+        default=None,
+        metavar="LANG",
         help="Target language for Canary translation (default: 'en'). "
-             "Example: --target-lang de",
+        "Example: --target-lang de",
     )
 
     # --- Language detection ---
     p.add_argument(
-        "--detect-language-only", action="store_true",
+        "--detect-language-only",
+        action="store_true",
         help="Detect the language of the audio and exit (no full transcription). "
-             "Transcribes a short segment and detects language from the output.",
+        "Transcribes a short segment and detects language from the output.",
     )
 
     # --- Output format ---
     p.add_argument(
-        "-f", "--format", default="text",
+        "-f",
+        "--format",
+        default="text",
         help="Output format (default: text). "
-             "Accepts: text, json, srt, vtt, tsv, csv, lrc, html, ass, ttml. "
-             "Comma-separated for multi: --format srt,text",
+        "Accepts: text, json, srt, vtt, tsv, csv, lrc, html, ass, ttml. "
+        "Comma-separated for multi: --format srt,text",
     )
     p.add_argument(
-        "--timestamps", action="store_true",
+        "--timestamps",
+        action="store_true",
         help="Enable word/segment/char timestamps.",
     )
     p.add_argument(
-        "--max-words-per-line", type=int, default=None, metavar="N",
+        "--max-words-per-line",
+        type=int,
+        default=None,
+        metavar="N",
         help="For SRT/VTT, split long segments into sub-cues with at most N words.",
     )
     p.add_argument(
-        "--max-chars-per-line", type=int, default=None, metavar="N",
+        "--max-chars-per-line",
+        type=int,
+        default=None,
+        metavar="N",
         help="For SRT/VTT/ASS/TTML, split subtitle lines so each fits within N characters.",
     )
     p.add_argument(
-        "-o", "--output", default=None, metavar="PATH",
+        "-o",
+        "--output",
+        default=None,
+        metavar="PATH",
         help="Output file or directory (directory for batch mode).",
     )
 
     # --- Long-form & streaming ---
     p.add_argument(
-        "--long-form", action="store_true",
+        "--long-form",
+        action="store_true",
         help="Enable local attention for audio >24 min.",
     )
     p.add_argument(
-        "--streaming", action="store_true",
+        "--streaming",
+        action="store_true",
         help="Streaming mode: print segments as they are transcribed.",
     )
 
     # --- Inference tuning ---
     p.add_argument(
-        "--batch-size", type=int, default=32, metavar="N",
+        "--batch-size",
+        type=int,
+        default=32,
+        metavar="N",
         help="Batch size for inference (default: 32).",
     )
 
     # --- Batch processing ---
     p.add_argument(
-        "--skip-existing", action="store_true",
+        "--skip-existing",
+        action="store_true",
         help="Skip files whose output already exists (batch mode).",
     )
 
     # --- Device ---
     p.add_argument(
-        "--device", default="auto", choices=["auto", "cpu", "cuda"],
+        "--device",
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
         help="Compute device (default: auto).",
     )
     p.add_argument(
-        "-q", "--quiet", action="store_true",
+        "-q",
+        "--quiet",
+        action="store_true",
         help="Suppress progress and status messages.",
     )
     p.add_argument(
-        "--agent", action="store_true",
+        "--agent",
+        action="store_true",
         help="Agent/chatbot output mode: emit a single compact JSON line to stdout "
-             "with text, duration, language, speakers, and stats. Implies --quiet. "
-             "File output (-o) still works alongside --agent.",
+        "with text, duration, language, speakers, and stats. Implies --quiet. "
+        "File output (-o) still works alongside --agent.",
     )
 
     # --- Diarization ---
     p.add_argument(
-        "--diarize", action="store_true",
+        "--diarize",
+        action="store_true",
         help="Speaker diarization using NeMo's clustering diarizer.",
     )
     p.add_argument(
-        "--min-speakers", type=int, default=None, metavar="N",
+        "--min-speakers",
+        type=int,
+        default=None,
+        metavar="N",
         help="Minimum number of speakers hint for diarization.",
     )
     p.add_argument(
-        "--max-speakers", type=int, default=None, metavar="N",
+        "--max-speakers",
+        type=int,
+        default=None,
+        metavar="N",
         help="Maximum number of speakers hint for diarization.",
     )
     p.add_argument(
-        "--speaker-names", default=None, metavar="NAMES",
+        "--speaker-names",
+        default=None,
+        metavar="NAMES",
         help="Comma-separated speaker names to replace SPEAKER_1, SPEAKER_2, etc.",
     )
     p.add_argument(
-        "--export-speakers", default=None, metavar="DIR",
+        "--export-speakers",
+        default=None,
+        metavar="DIR",
         help="After diarization, export each speaker's audio to separate WAV files.",
     )
 
     # --- Audio preprocessing ---
     p.add_argument(
-        "--normalize", action="store_true",
+        "--normalize",
+        action="store_true",
         help="Normalize audio volume before transcription (EBU R128 loudnorm).",
     )
     p.add_argument(
-        "--denoise", action="store_true",
+        "--denoise",
+        action="store_true",
         help="Apply noise reduction before transcription (high-pass + FFT denoise).",
     )
     p.add_argument(
-        "--channel", default="mix", choices=["left", "right", "mix"],
+        "--channel",
+        default="mix",
+        choices=["left", "right", "mix"],
         help="Stereo channel to transcribe (default: mix).",
     )
 
     # --- Post-processing ---
     p.add_argument(
-        "--clean-filler", action="store_true",
+        "--clean-filler",
+        action="store_true",
         help="Remove hesitation fillers (um, uh, etc.) from transcript.",
     )
     p.add_argument(
-        "--filter-hallucinations", action="store_true",
+        "--filter-hallucinations",
+        action="store_true",
         help="Filter common hallucination patterns.",
     )
     p.add_argument(
-        "--merge-sentences", action="store_true",
+        "--merge-sentences",
+        action="store_true",
         help="Merge consecutive segments into sentence-level chunks.",
     )
     p.add_argument(
-        "--detect-paragraphs", action="store_true",
+        "--detect-paragraphs",
+        action="store_true",
         help="Insert paragraph breaks based on silence gaps.",
     )
     p.add_argument(
-        "--paragraph-gap", type=float, default=3.0, metavar="SEC",
+        "--paragraph-gap",
+        type=float,
+        default=3.0,
+        metavar="SEC",
         help="Minimum silence gap for new paragraph (default: 3.0).",
     )
 
     # --- Search ---
     p.add_argument(
-        "--search", default=None, metavar="TERM",
+        "--search",
+        default=None,
+        metavar="TERM",
         help="Search the transcript for TERM and print matching segments.",
     )
     p.add_argument(
-        "--search-fuzzy", action="store_true",
+        "--search-fuzzy",
+        action="store_true",
         help="Use fuzzy/approximate matching with --search.",
     )
 
     # --- Chapter detection ---
     p.add_argument(
-        "--detect-chapters", action="store_true",
+        "--detect-chapters",
+        action="store_true",
         help="Detect chapter/section breaks from silence gaps.",
     )
     p.add_argument(
-        "--chapter-gap", type=float, default=8.0, metavar="SEC",
+        "--chapter-gap",
+        type=float,
+        default=8.0,
+        metavar="SEC",
         help="Minimum silence gap for new chapter (default: 8.0).",
     )
     p.add_argument(
-        "--chapters-file", default=None, metavar="PATH",
+        "--chapters-file",
+        default=None,
+        metavar="PATH",
         help="Write chapter markers to this file.",
     )
     p.add_argument(
-        "--chapter-format", default="youtube",
+        "--chapter-format",
+        default="youtube",
         choices=["youtube", "text", "json"],
         help="Chapter output format (default: youtube).",
     )
 
     # --- RSS ---
     p.add_argument(
-        "--rss", default=None, metavar="URL",
+        "--rss",
+        default=None,
+        metavar="URL",
         help="Podcast RSS feed URL — extracts audio and transcribes.",
     )
     p.add_argument(
-        "--rss-latest", type=int, default=5, metavar="N",
+        "--rss-latest",
+        type=int,
+        default=5,
+        metavar="N",
         help="Number of most-recent episodes from --rss feed (default: 5).",
     )
 
     # --- Burn-in ---
     p.add_argument(
-        "--burn-in", default=None, metavar="OUTPUT",
+        "--burn-in",
+        default=None,
+        metavar="OUTPUT",
         help="Burn subtitles into the original video.",
     )
 
     # --- Stats ---
     p.add_argument(
-        "--stats-file", default=None, metavar="PATH",
+        "--stats-file",
+        default=None,
+        metavar="PATH",
         help="Write performance stats JSON sidecar after transcription.",
     )
 
     # --- Multitalker ---
     p.add_argument(
-        "--multitalker", action="store_true",
+        "--multitalker",
+        action="store_true",
         help="Use multitalker pipeline for better overlapped speech handling. "
-             "Requires ~6GB VRAM (loads Sortformer diarizer + multitalker ASR). "
-             "English only. Implies --diarize.",
+        "Requires ~6GB VRAM (loads Sortformer diarizer + multitalker ASR). "
+        "English only. Implies --diarize.",
     )
     p.add_argument(
-        "--multitalker-diar-model", default=None, metavar="MODEL",
+        "--multitalker-diar-model",
+        default=None,
+        metavar="MODEL",
         help="Override diarizer model for multitalker mode "
-             "(default: nvidia/diar_streaming_sortformer_4spk-v2.1). "
-             "Accepts full HuggingFace model path.",
+        "(default: nvidia/diar_streaming_sortformer_4spk-v2.1). "
+        "Accepts full HuggingFace model path.",
     )
     p.add_argument(
-        "--multitalker-asr-model", default=None, metavar="MODEL",
+        "--multitalker-asr-model",
+        default=None,
+        metavar="MODEL",
         help="Override ASR model for multitalker mode "
-             "(default: nvidia/multitalker-parakeet-streaming-0.6b-v1). "
-             "Accepts full HuggingFace model path.",
+        "(default: nvidia/multitalker-parakeet-streaming-0.6b-v1). "
+        "Accepts full HuggingFace model path.",
     )
 
     # --- Fast mode ---
     p.add_argument(
-        "--fast", action="store_true",
+        "--fast",
+        action="store_true",
         help="Use the small 110M model for quick transcription (lower accuracy, ~2GB VRAM). "
-             "Equivalent to --model nvidia/parakeet-tdt_ctc-110m.",
+        "Equivalent to --model nvidia/parakeet-tdt_ctc-110m.",
     )
 
     # --- Alignment ---
     p.add_argument(
-        "--no-align", action="store_true",
+        "--no-align",
+        action="store_true",
         help="Skip wav2vec2 timestamp alignment refinement (faster, slightly less precise timestamps).",
     )
 
     # --- Resume ---
     p.add_argument(
-        "--resume", default=None, metavar="PATH",
+        "--resume",
+        default=None,
+        metavar="PATH",
         help="Resume batch processing from a progress checkpoint file. "
-             "Skips already-completed files. Creates the file if it doesn't exist.",
+        "Skips already-completed files. Creates the file if it doesn't exist.",
     )
 
     # --- Utility ---
     p.add_argument(
-        "--version", action="store_true",
+        "--version",
+        action="store_true",
         help="Show version info and exit.",
     )
 
@@ -1916,9 +2145,7 @@ def main():
 
     # Multi-format + file path (not dir) is an error
     if len(args._formats) > 1 and args.output and Path(args.output).suffix:
-        p.error(
-            f"Multiple formats ({', '.join(args._formats)}) require -o to be a directory."
-        )
+        p.error(f"Multiple formats ({', '.join(args._formats)}) require -o to be a directory.")
 
     # Agent mode: auto-enable quiet (suppress all stderr)
     if getattr(args, "agent", False):
@@ -1957,7 +2184,7 @@ def main():
                 )
 
     # --source-lang / --target-lang imply Canary model
-    if (getattr(args, "source_lang", None) or getattr(args, "target_lang", None)):
+    if getattr(args, "source_lang", None) or getattr(args, "target_lang", None):
         if not is_canary_model(args.model) and not args.translate:
             args.model = "nvidia/canary-1b-v2"
             args.translate = True
@@ -2015,7 +2242,10 @@ def main():
         effective_device = args.device
 
     if effective_device == "cpu" and not args.quiet:
-        print("⚠️  Using CPU — transcription will be slower. GPU strongly recommended.", file=sys.stderr)
+        print(
+            "⚠️  Using CPU — transcription will be slower. GPU strongly recommended.",
+            file=sys.stderr,
+        )
 
     if not args.quiet:
         gpu_str = f" on {gpu_name}" if effective_device == "cuda" and gpu_name else ""
@@ -2032,11 +2262,15 @@ def main():
     # ---- Warn about batch stem collisions ----
     if is_batch and args.output:
         from collections import Counter
+
         _stems = Counter(Path(f).stem for f in audio_files)
         _dupes = {s: c for s, c in _stems.items() if c > 1}
         if _dupes and not args.quiet:
             _dup_names = ", ".join(f"{s} ({c}×)" for s, c in _dupes.items())
-            print(f"⚠️  Batch stem collision: {_dup_names} — later files will overwrite earlier ones.", file=sys.stderr)
+            print(
+                f"⚠️  Batch stem collision: {_dup_names} — later files will overwrite earlier ones.",
+                file=sys.stderr,
+            )
 
     # ---- Load model ----
     is_canary = is_canary_model(args.model)
@@ -2072,11 +2306,17 @@ def main():
 
                 if args.format == "json":
                     import json as _json
-                    print(_json.dumps({
-                        "language": detected_lang,
-                        "language_probability": prob,
-                        "sample": text[:200].strip(),
-                    }, ensure_ascii=False))
+
+                    print(
+                        _json.dumps(
+                            {
+                                "language": detected_lang,
+                                "language_probability": prob,
+                                "sample": text[:200].strip(),
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
                 else:
                     lang_str = detected_lang or "unknown"
                     print(f"Language: {lang_str} (probability: {prob:.3f})")
@@ -2100,7 +2340,10 @@ def main():
         progress_path = args.resume
         progress = load_progress(progress_path)
         if progress["completed"] and not args.quiet:
-            print(f"📋 Resuming: {len(progress['completed'])} file(s) already done", file=sys.stderr)
+            print(
+                f"📋 Resuming: {len(progress['completed'])} file(s) already done",
+                file=sys.stderr,
+            )
 
     # ---- Transcribe ----
     results = []
@@ -2160,7 +2403,11 @@ def main():
         try:
             if args.multitalker:
                 r = transcribe_multitalker(audio_path, args)
-            elif is_canary and (args.translate or getattr(args, "source_lang", None) or getattr(args, "target_lang", None)):
+            elif is_canary and (
+                args.translate
+                or getattr(args, "source_lang", None)
+                or getattr(args, "target_lang", None)
+            ):
                 r = transcribe_canary(audio_path, asr_model, args)
             elif args.streaming:
                 r = transcribe_file_streaming(audio_path, asr_model, args)
@@ -2180,17 +2427,26 @@ def main():
             files_done += 1
             # Save failed files to progress too
             if progress is not None and progress_path:
-                progress["failed"].append({
-                    "path": os.path.abspath(audio_path),
-                    "error": str(e),
-                })
+                progress["failed"].append(
+                    {
+                        "path": os.path.abspath(audio_path),
+                        "error": str(e),
+                    }
+                )
                 save_progress(progress_path, progress)
             if not is_batch:
                 err_msg = str(e).lower()
-                if any(k in err_msg for k in (
-                    "format not recognised", "invalid data", "no backend",
-                    "failed to open", "not found", "bad input",
-                )):
+                if any(
+                    k in err_msg
+                    for k in (
+                        "format not recognised",
+                        "invalid data",
+                        "no backend",
+                        "failed to open",
+                        "not found",
+                        "bad input",
+                    )
+                ):
                     sys.exit(EXIT_BAD_INPUT)
                 elif "out of memory" in err_msg or "oom" in err_msg:
                     sys.exit(EXIT_GPU_ERROR)
@@ -2227,8 +2483,10 @@ def main():
             else:
                 audio_src = r.get("_audio_path", r["file"])
                 export_speakers_audio(
-                    audio_src, r.get("segments", []),
-                    args.export_speakers, quiet=args.quiet,
+                    audio_src,
+                    r.get("segments", []),
+                    args.export_speakers,
+                    quiet=args.quiet,
                 )
 
         # Streaming already printed segments
@@ -2268,13 +2526,18 @@ def main():
                 formats = getattr(args, "_formats", [args.format])
                 for fmt in formats:
                     output = format_result(
-                        r, fmt,
+                        r,
+                        fmt,
                         max_words_per_line=args.max_words_per_line,
                         max_chars_per_line=getattr(args, "max_chars_per_line", None),
                     )
                     out_path = Path(args.output)
                     multi_fmt = len(formats) > 1
-                    if out_path.is_dir() or (is_batch and not out_path.suffix) or (multi_fmt and not out_path.suffix):
+                    if (
+                        out_path.is_dir()
+                        or (is_batch and not out_path.suffix)
+                        or (multi_fmt and not out_path.suffix)
+                    ):
                         out_path.mkdir(parents=True, exist_ok=True)
                         dest = out_path / (stem + EXT_MAP.get(fmt, ".txt"))
                     else:
@@ -2319,7 +2582,8 @@ def main():
                 )
             for fmt_idx, fmt in enumerate(formats):
                 output = format_result(
-                    r, fmt,
+                    r,
+                    fmt,
                     max_words_per_line=args.max_words_per_line,
                     max_chars_per_line=getattr(args, "max_chars_per_line", None),
                 )
@@ -2327,7 +2591,11 @@ def main():
                 if args.output:
                     out_path = Path(args.output)
                     multi_fmt = len(formats) > 1
-                    if out_path.is_dir() or (is_batch and not out_path.suffix) or (multi_fmt and not out_path.suffix):
+                    if (
+                        out_path.is_dir()
+                        or (is_batch and not out_path.suffix)
+                        or (multi_fmt and not out_path.suffix)
+                    ):
                         out_path.mkdir(parents=True, exist_ok=True)
                         dest = out_path / (stem + EXT_MAP.get(fmt, ".txt"))
                     else:
@@ -2375,7 +2643,10 @@ def main():
         if getattr(args, "burn_in", None):
             if is_batch:
                 if not args.quiet:
-                    print("⚠️  --burn-in is only supported for single-file mode; skipping", file=sys.stderr)
+                    print(
+                        "⚠️  --burn-in is only supported for single-file mode; skipping",
+                        file=sys.stderr,
+                    )
             elif not r.get("segments"):
                 if not args.quiet:
                     print("⚠️  --burn-in skipped: no speech segments detected", file=sys.stderr)
@@ -2383,6 +2654,7 @@ def main():
                 srt_content = to_srt(r["segments"])
                 src_path = r.get("_audio_path", r["file"])
                 from lib.audio import burn_subtitles
+
                 burn_subtitles(src_path, srt_content, args.burn_in, quiet=args.quiet)
 
     # Batch summary

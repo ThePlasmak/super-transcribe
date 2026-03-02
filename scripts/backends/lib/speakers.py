@@ -3,20 +3,25 @@ Shared speaker-related functions for super-transcribe backends.
 Includes: speaker name mapping, speaker audio export.
 """
 
-import os
-import subprocess
+from __future__ import annotations
+
 import shutil
+import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from .formatters import format_duration
+
+Segment = dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
 # Speaker name mapping
 # ---------------------------------------------------------------------------
 
-def apply_speaker_names(segments, names_str):
+
+def apply_speaker_names(segments: list[Segment], names_str: str) -> list[Segment]:
     """Replace SPEAKER_1, SPEAKER_2, … with real names from a comma-separated list."""
     names = [n.strip() for n in names_str.split(",") if n.strip()]
     mapping = {}
@@ -41,7 +46,10 @@ def apply_speaker_names(segments, names_str):
 # Speaker audio export
 # ---------------------------------------------------------------------------
 
-def export_speakers_audio(audio_path, segments, output_dir, quiet=False):
+
+def export_speakers_audio(
+    audio_path: str, segments: list[Segment], output_dir: str, quiet: bool = False
+) -> None:
     """Export each speaker's audio as a separate WAV file."""
     if not shutil.which("ffmpeg"):
         print("⚠️  --export-speakers requires ffmpeg in PATH", file=sys.stderr)
@@ -67,13 +75,15 @@ def export_speakers_audio(audio_path, segments, output_dir, quiet=False):
     for speaker, ranges in sorted(speaker_ranges.items()):
         out_file = out_dir / f"{speaker}.wav"
 
-        select_expr = "+".join(
-            f"between(t,{start:.3f},{end:.3f})" for start, end in ranges
-        )
+        select_expr = "+".join(f"between(t,{start:.3f},{end:.3f})" for start, end in ranges)
 
         cmd = [
-            "ffmpeg", "-y", "-i", audio_path,
-            "-af", f"aselect='{select_expr}',asetpts=N/SR/TB",
+            "ffmpeg",
+            "-y",
+            "-i",
+            audio_path,
+            "-af",
+            f"aselect='{select_expr}',asetpts=N/SR/TB",
             str(out_file),
         ]
 

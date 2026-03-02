@@ -97,7 +97,7 @@ class TestFetchRssErrors:
         assert exc.value.code == 3
 
     def test_network_error_exits_3(self):
-        mock_urlopen = MagicMock(side_effect=Exception("Connection refused"))
+        mock_urlopen = MagicMock(side_effect=OSError("Connection refused"))
         with patch("urllib.request.urlopen", mock_urlopen):
             with pytest.raises(SystemExit) as exc:
                 fetch_rss_episodes("https://x.com/feed.rss", quiet=True)

@@ -4,9 +4,15 @@ Includes: search, chapters, filler removal, paragraph detection,
 sentence merging, hallucination filtering.
 """
 
+from __future__ import annotations
+
+import difflib
 import json
 import re
-import difflib
+from typing import Any
+
+# AIDEV-NOTE: Segment is an untyped dict throughout; mirrors formatters.Segment.
+Segment = dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -21,19 +27,26 @@ _TERMINAL_PUNCT = re.compile(r'[.!?…。！？]["\')\]]*\s*$')
 # ---------------------------------------------------------------------------
 
 HALLUCINATION_PATTERNS = [
-    re.compile(r'^\s*\[?\s*(music|applause|laughter|silence|inaudible|background noise)\s*\]?\s*$', re.I),
-    re.compile(r'^\s*\(?\s*(music|applause|laughter|upbeat music|dramatic music|suspenseful music|tense music|gentle music)\s*\)?\s*$', re.I),
-    re.compile(r'thank\s+you\s+for\s+watching', re.I),
-    re.compile(r'thank\s+you\s+for\s+(listening|your\s+attention)', re.I),
-    re.compile(r'subtitles?\s+by', re.I),
-    re.compile(r'(transcribed|captioned)\s+by', re.I),
-    re.compile(r'^\s*www\.\S+\s*$', re.I),
-    re.compile(r'^\s*[.!?,;:\u2026]+\s*$'),
-    re.compile(r'^\s*$'),
+    re.compile(
+        r"^\s*\[?\s*(music|applause|laughter|silence|inaudible|background noise)\s*\]?\s*$",
+        re.I,
+    ),
+    re.compile(
+        r"^\s*\(?\s*(music|applause|laughter|upbeat music|dramatic music"
+        r"|suspenseful music|tense music|gentle music)\s*\)?\s*$",
+        re.I,
+    ),
+    re.compile(r"thank\s+you\s+for\s+watching", re.I),
+    re.compile(r"thank\s+you\s+for\s+(listening|your\s+attention)", re.I),
+    re.compile(r"subtitles?\s+by", re.I),
+    re.compile(r"(transcribed|captioned)\s+by", re.I),
+    re.compile(r"^\s*www\.\S+\s*$", re.I),
+    re.compile(r"^\s*[.!?,;:\u2026]+\s*$"),
+    re.compile(r"^\s*$"),
 ]
 
 
-def filter_hallucinations(segments):
+def filter_hallucinations(segments: list[Segment]) -> list[Segment]:
     """Remove segments matching common hallucination patterns."""
     filtered = []
     prev_text = None
@@ -53,22 +66,22 @@ def filter_hallucinations(segments):
 # ---------------------------------------------------------------------------
 
 _FILLER_PATTERNS = [
-    re.compile(r'\b(um+|uh+|er+|ah+|hmm+|hm+)\b', re.I),
-    re.compile(r'\byou know\b', re.I),
-    re.compile(r'\bI mean\b', re.I),
-    re.compile(r'\byou see\b', re.I),
+    re.compile(r"\b(um+|uh+|er+|ah+|hmm+|hm+)\b", re.I),
+    re.compile(r"\byou know\b", re.I),
+    re.compile(r"\bI mean\b", re.I),
+    re.compile(r"\byou see\b", re.I),
 ]
 
-_FILLER_WORD_RE = re.compile(r'^(um+|uh+|er+|ah+|hmm+|hm+)$', re.I)
+_FILLER_WORD_RE = re.compile(r"^(um+|uh+|er+|ah+|hmm+|hm+)$", re.I)
 _FILLER_BIGRAMS = [("you", "know"), ("i", "mean"), ("you", "see")]
 
 
-def _word_bare(w):
+def _word_bare(w: Segment) -> str:
     """Return the bare lowercased text of a word token."""
     return re.sub(r"[^\w']", "", w["word"].lower().strip())
 
 
-def _filter_word_list(words):
+def _filter_word_list(words: list[Segment]) -> list[Segment]:
     """Remove filler words from a word list."""
     if not words:
         return words
@@ -90,18 +103,18 @@ def _filter_word_list(words):
     return [w for idx, w in enumerate(words) if idx not in remove_idx]
 
 
-def remove_filler_words(segments):
+def remove_filler_words(segments: list[Segment]) -> list[Segment]:
     """Strip hesitation fillers and discourse markers from segments."""
     cleaned = []
     for seg in segments:
         text = seg["text"]
         for pat in _FILLER_PATTERNS:
             text = pat.sub("", text)
-        text = re.sub(r'^[\s,.!?;:]+', '', text)
-        text = re.sub(r'\s+([,.!?;:])', r'\1', text)
-        text = re.sub(r'([,.!?;:])\1+', r'\1', text)
-        text = re.sub(r',([.!?])', r'\1', text)
-        text = re.sub(r'  +', ' ', text)
+        text = re.sub(r"^[\s,.!?;:]+", "", text)
+        text = re.sub(r"\s+([,.!?;:])", r"\1", text)
+        text = re.sub(r"([,.!?;:])\1+", r"\1", text)
+        text = re.sub(r",([.!?])", r"\1", text)
+        text = re.sub(r"  +", " ", text)
         text = text.strip()
         if not text:
             continue
@@ -117,7 +130,10 @@ def remove_filler_words(segments):
 # Paragraph detection
 # ---------------------------------------------------------------------------
 
-def detect_paragraphs(segments, min_gap=3.0, sentence_gap=1.5):
+
+def detect_paragraphs(
+    segments: list[Segment], min_gap: float = 3.0, sentence_gap: float = 1.5
+) -> list[Segment]:
     """Mark segments with 'paragraph_start': True at paragraph boundaries."""
     if not segments:
         return segments
@@ -137,7 +153,8 @@ def detect_paragraphs(segments, min_gap=3.0, sentence_gap=1.5):
 # Sentence merging
 # ---------------------------------------------------------------------------
 
-def merge_sentences(segments):
+
+def merge_sentences(segments: list[Segment]) -> list[Segment]:
     """Merge consecutive short segments into sentence-boundary-aware chunks."""
     MAX_GAP = 2.0
 
@@ -181,7 +198,8 @@ def merge_sentences(segments):
 # Chapter detection
 # ---------------------------------------------------------------------------
 
-def detect_chapters(segments, min_gap=8.0):
+
+def detect_chapters(segments: list[Segment], min_gap: float = 8.0) -> list[dict[str, Any]]:
     """Detect chapter breaks from silence gaps between segments."""
     if not segments:
         return []
@@ -193,16 +211,18 @@ def detect_chapters(segments, min_gap=8.0):
         gap = segments[i]["start"] - segments[i - 1]["end"]
         if gap >= min_gap:
             chapter_num += 1
-            chapters.append({
-                "chapter": chapter_num,
-                "start": segments[i]["start"],
-                "title": f"Chapter {chapter_num}",
-            })
+            chapters.append(
+                {
+                    "chapter": chapter_num,
+                    "start": segments[i]["start"],
+                    "title": f"Chapter {chapter_num}",
+                }
+            )
 
     return chapters
 
 
-def _fmt_chapter_ts(seconds):
+def _fmt_chapter_ts(seconds: float) -> str:
     """Format chapter timestamp: M:SS or H:MM:SS."""
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -210,7 +230,7 @@ def _fmt_chapter_ts(seconds):
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def format_chapters_output(chapters, fmt="youtube"):
+def format_chapters_output(chapters: list[dict[str, Any]], fmt: str = "youtube") -> str:
     """Render chapter list."""
     if fmt == "json":
         return json.dumps(chapters, indent=2, ensure_ascii=False)
@@ -225,16 +245,17 @@ def format_chapters_output(chapters, fmt="youtube"):
             lines.append(f"{ch['title']}: {ts}")
         return "\n".join(lines)
 
-    return "\n".join(
-        f"{_fmt_chapter_ts(ch['start'])} {ch['title']}" for ch in chapters
-    )
+    return "\n".join(f"{_fmt_chapter_ts(ch['start'])} {ch['title']}" for ch in chapters)
 
 
 # ---------------------------------------------------------------------------
 # Transcript search
 # ---------------------------------------------------------------------------
 
-def search_transcript(segments, query, fuzzy=False):
+
+def search_transcript(
+    segments: list[Segment], query: str, fuzzy: bool = False
+) -> list[dict[str, Any]]:
     """Search transcript segments for *query*."""
     query_lower = query.lower()
     matches = []
@@ -258,17 +279,19 @@ def search_transcript(segments, query, fuzzy=False):
                     matched = True
 
         if matched:
-            matches.append({
-                "start": seg["start"],
-                "end": seg["end"],
-                "text": text,
-                "speaker": seg.get("speaker"),
-            })
+            matches.append(
+                {
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "text": text,
+                    "speaker": seg.get("speaker"),
+                }
+            )
 
     return matches
 
 
-def format_search_results(matches, query):
+def format_search_results(matches: list[dict[str, Any]], query: str) -> str:
     """Format search results for display."""
     if not matches:
         return f'No matches found for: "{query}"'

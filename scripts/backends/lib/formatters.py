@@ -3,18 +3,25 @@ Shared output formatters for super-transcribe backends.
 Supports: text, JSON, SRT, VTT, ASS, LRC, TTML, CSV, TSV, HTML.
 """
 
+from __future__ import annotations
+
 import csv
 import html as _html
 import io
 import json
 import math
+from typing import Any
+
+# AIDEV-NOTE: Segment is an untyped dict throughout; backends produce varying shapes.
+Segment = dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
 # Timestamp helpers
 # ---------------------------------------------------------------------------
 
-def format_ts_srt(seconds):
+
+def format_ts_srt(seconds: float) -> str:
     """Format seconds as SRT timestamp: HH:MM:SS,mmm"""
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -23,7 +30,7 @@ def format_ts_srt(seconds):
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def format_ts_vtt(seconds):
+def format_ts_vtt(seconds: float) -> str:
     """Format seconds as VTT timestamp: HH:MM:SS.mmm"""
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -32,7 +39,7 @@ def format_ts_vtt(seconds):
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
-def format_ts_ass(seconds):
+def format_ts_ass(seconds: float) -> str:
     """Format seconds as ASS/SSA timestamp: H:MM:SS.cc (centiseconds)"""
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -41,7 +48,7 @@ def format_ts_ass(seconds):
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-def format_ts_ttml(seconds):
+def format_ts_ttml(seconds: float) -> str:
     """Format seconds as TTML timestamp: HH:MM:SS.mmm"""
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -50,7 +57,7 @@ def format_ts_ttml(seconds):
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
-def format_duration(seconds):
+def format_duration(seconds: float) -> str:
     """Format duration as human-readable string."""
     if seconds < 60:
         return f"{seconds:.1f}s"
@@ -68,7 +75,8 @@ def format_duration(seconds):
 # Character-based subtitle line splitting
 # ---------------------------------------------------------------------------
 
-def split_words_by_chars(words, max_chars):
+
+def split_words_by_chars(words: list[Segment], max_chars: int) -> list[list[Segment]]:
     """Split a list of word dicts into chunks where each chunk's joined text
     fits within max_chars characters."""
     if not words:
@@ -95,7 +103,12 @@ def split_words_by_chars(words, max_chars):
 # SRT
 # ---------------------------------------------------------------------------
 
-def to_srt(segments, max_words_per_line=None, max_chars_per_line=None):
+
+def to_srt(
+    segments: list[Segment],
+    max_words_per_line: int | None = None,
+    max_chars_per_line: int | None = None,
+) -> str:
     """Format segments as SRT subtitle content."""
     lines = []
     cue_num = 1
@@ -110,19 +123,23 @@ def to_srt(segments, max_words_per_line=None, max_chars_per_line=None):
                 if seg.get("speaker"):
                     chunk_text = f"[{seg['speaker']}] {chunk_text}"
                 lines.append(str(cue_num))
-                lines.append(f"{format_ts_srt(chunk[0]['start'])} --> {format_ts_srt(chunk[-1]['end'])}")
+                lines.append(
+                    f"{format_ts_srt(chunk[0]['start'])} --> {format_ts_srt(chunk[-1]['end'])}"
+                )
                 lines.append(chunk_text)
                 lines.append("")
                 cue_num += 1
         elif max_words_per_line and seg.get("words"):
             words = seg["words"]
             for i in range(0, len(words), max_words_per_line):
-                chunk = words[i:i + max_words_per_line]
+                chunk = words[i : i + max_words_per_line]
                 chunk_text = "".join(w["word"] for w in chunk).strip()
                 if seg.get("speaker"):
                     chunk_text = f"[{seg['speaker']}] {chunk_text}"
                 lines.append(str(cue_num))
-                lines.append(f"{format_ts_srt(chunk[0]['start'])} --> {format_ts_srt(chunk[-1]['end'])}")
+                lines.append(
+                    f"{format_ts_srt(chunk[0]['start'])} --> {format_ts_srt(chunk[-1]['end'])}"
+                )
                 lines.append(chunk_text)
                 lines.append("")
                 cue_num += 1
@@ -139,7 +156,12 @@ def to_srt(segments, max_words_per_line=None, max_chars_per_line=None):
 # VTT
 # ---------------------------------------------------------------------------
 
-def to_vtt(segments, max_words_per_line=None, max_chars_per_line=None):
+
+def to_vtt(
+    segments: list[Segment],
+    max_words_per_line: int | None = None,
+    max_chars_per_line: int | None = None,
+) -> str:
     """Format segments as WebVTT subtitle content."""
     lines = ["WEBVTT", ""]
     cue_num = 1
@@ -154,19 +176,23 @@ def to_vtt(segments, max_words_per_line=None, max_chars_per_line=None):
                 if seg.get("speaker"):
                     chunk_text = f"[{seg['speaker']}] {chunk_text}"
                 lines.append(str(cue_num))
-                lines.append(f"{format_ts_vtt(chunk[0]['start'])} --> {format_ts_vtt(chunk[-1]['end'])}")
+                lines.append(
+                    f"{format_ts_vtt(chunk[0]['start'])} --> {format_ts_vtt(chunk[-1]['end'])}"
+                )
                 lines.append(chunk_text)
                 lines.append("")
                 cue_num += 1
         elif max_words_per_line and seg.get("words"):
             words = seg["words"]
             for i in range(0, len(words), max_words_per_line):
-                chunk = words[i:i + max_words_per_line]
+                chunk = words[i : i + max_words_per_line]
                 chunk_text = "".join(w["word"] for w in chunk).strip()
                 if seg.get("speaker"):
                     chunk_text = f"[{seg['speaker']}] {chunk_text}"
                 lines.append(str(cue_num))
-                lines.append(f"{format_ts_vtt(chunk[0]['start'])} --> {format_ts_vtt(chunk[-1]['end'])}")
+                lines.append(
+                    f"{format_ts_vtt(chunk[0]['start'])} --> {format_ts_vtt(chunk[-1]['end'])}"
+                )
                 lines.append(chunk_text)
                 lines.append("")
                 cue_num += 1
@@ -183,7 +209,8 @@ def to_vtt(segments, max_words_per_line=None, max_chars_per_line=None):
 # Plain text
 # ---------------------------------------------------------------------------
 
-def to_text(segments):
+
+def to_text(segments: list[Segment]) -> str:
     """Format segments as plain text, with speaker labels if present."""
     has_speakers = any(seg.get("speaker") for seg in segments)
     has_paragraphs = any(seg.get("paragraph_start") for seg in segments)
@@ -217,7 +244,8 @@ def to_text(segments):
 # TSV
 # ---------------------------------------------------------------------------
 
-def to_tsv(segments):
+
+def to_tsv(segments: list[Segment]) -> str:
     """Format segments as TSV (OpenAI Whisper format): start_ms TAB end_ms TAB text"""
     lines = []
     for seg in segments:
@@ -234,7 +262,8 @@ def to_tsv(segments):
 # CSV
 # ---------------------------------------------------------------------------
 
-def to_csv(segments):
+
+def to_csv(segments: list[Segment]) -> str:
     """Format segments as CSV with header: start_s, end_s, text [, speaker]."""
     has_speakers = any(seg.get("speaker") for seg in segments)
     fieldnames = ["start_s", "end_s", "text"] + (["speaker"] if has_speakers else [])
@@ -257,7 +286,12 @@ def to_csv(segments):
 # ASS/SSA
 # ---------------------------------------------------------------------------
 
-def to_ass(segments, max_words_per_line=None, max_chars_per_line=None):
+
+def to_ass(
+    segments: list[Segment],
+    max_words_per_line: int | None = None,
+    max_chars_per_line: int | None = None,
+) -> str:
     """Format segments as ASS/SSA (Advanced SubStation Alpha) subtitle content."""
     header = (
         "[Script Info]\n"
@@ -299,7 +333,7 @@ def to_ass(segments, max_words_per_line=None, max_chars_per_line=None):
         elif max_words_per_line and seg.get("words"):
             words = seg["words"]
             for i in range(0, len(words), max_words_per_line):
-                chunk = words[i:i + max_words_per_line]
+                chunk = words[i : i + max_words_per_line]
                 chunk_text = "".join(w["word"] for w in chunk).strip()
                 if seg.get("speaker"):
                     chunk_text = f"[{seg['speaker']}] {chunk_text}"
@@ -320,7 +354,8 @@ def to_ass(segments, max_words_per_line=None, max_chars_per_line=None):
 # LRC
 # ---------------------------------------------------------------------------
 
-def to_lrc(segments):
+
+def to_lrc(segments: list[Segment]) -> str:
     """Format segments as LRC (timed lyrics) format."""
     lines = []
     for seg in segments:
@@ -341,16 +376,23 @@ def to_lrc(segments):
 # TTML
 # ---------------------------------------------------------------------------
 
-def to_ttml(segments, language="en", max_words_per_line=None, max_chars_per_line=None):
+
+def to_ttml(
+    segments: list[Segment],
+    language: str = "en",
+    max_words_per_line: int | None = None,
+    max_chars_per_line: int | None = None,
+) -> str:
     """Format segments as TTML (Timed Text Markup Language / DFXP) subtitles."""
     lang_attr = (language or "en").replace("_", "-")
 
     def xml_escape(text):
-        return (text
-                .replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace('"', "&quot;"))
+        return (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
 
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -358,11 +400,11 @@ def to_ttml(segments, language="en", max_words_per_line=None, max_chars_per_line
         '    xmlns="http://www.w3.org/ns/ttml"',
         '    xmlns:tts="http://www.w3.org/ns/ttml#styling"',
         '    xmlns:ttm="http://www.w3.org/ns/ttml#metadata">',
-        '  <head>',
-        '    <metadata>',
-        '      <ttm:title>Transcript</ttm:title>',
-        '    </metadata>',
-        '    <styling>',
+        "  <head>",
+        "    <metadata>",
+        "      <ttm:title>Transcript</ttm:title>",
+        "    </metadata>",
+        "    <styling>",
         '      <style xml:id="s1"',
         '             tts:fontFamily="Arial, Helvetica, sans-serif"',
         '             tts:fontSize="100%"',
@@ -370,15 +412,15 @@ def to_ttml(segments, language="en", max_words_per_line=None, max_chars_per_line
         '             tts:color="white"',
         '             tts:textAlign="center"',
         '             tts:backgroundColor="transparent"/>',
-        '    </styling>',
-        '    <layout>',
+        "    </styling>",
+        "    <layout>",
         '      <region xml:id="r1"',
         '              tts:origin="10% 85%"',
         '              tts:extent="80% 10%"',
         '              tts:displayAlign="before"/>',
-        '    </layout>',
-        '  </head>',
-        '  <body>',
+        "    </layout>",
+        "  </head>",
+        "  <body>",
         '    <div region="r1">',
     ]
 
@@ -392,19 +434,21 @@ def to_ttml(segments, language="en", max_words_per_line=None, max_chars_per_line
                 begin = format_ts_ttml(chunk[0]["start"])
                 end = format_ts_ttml(chunk[-1]["end"])
                 lines.append(
-                    f'      <p begin="{begin}" end="{end}" style="s1">{xml_escape(chunk_text)}</p>'
+                    f'      <p begin="{begin}" end="{end}"'
+                    f' style="s1">{xml_escape(chunk_text)}</p>'
                 )
         elif max_words_per_line and seg.get("words"):
             words = seg["words"]
             for i in range(0, len(words), max_words_per_line):
-                chunk = words[i:i + max_words_per_line]
+                chunk = words[i : i + max_words_per_line]
                 chunk_text = "".join(w["word"] for w in chunk).strip()
                 if seg.get("speaker"):
                     chunk_text = f"[{seg['speaker']}] {chunk_text}"
                 begin = format_ts_ttml(chunk[0]["start"])
                 end = format_ts_ttml(chunk[-1]["end"])
                 lines.append(
-                    f'      <p begin="{begin}" end="{end}" style="s1">{xml_escape(chunk_text)}</p>'
+                    f'      <p begin="{begin}" end="{end}"'
+                    f' style="s1">{xml_escape(chunk_text)}</p>'
                 )
         else:
             text = seg["text"].strip()
@@ -416,11 +460,13 @@ def to_ttml(segments, language="en", max_words_per_line=None, max_chars_per_line
                 f'      <p begin="{begin}" end="{end}" style="s1">{xml_escape(text)}</p>'
             )
 
-    lines.extend([
-        '    </div>',
-        '  </body>',
-        '</tt>',
-    ])
+    lines.extend(
+        [
+            "    </div>",
+            "  </body>",
+            "</tt>",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -428,7 +474,8 @@ def to_ttml(segments, language="en", max_words_per_line=None, max_chars_per_line
 # HTML
 # ---------------------------------------------------------------------------
 
-def to_html(result):
+
+def to_html(result: dict[str, Any]) -> str:
     """Format transcript as HTML with confidence-colored words."""
     file_name = result.get("file", "")
     language = result.get("language", "")
@@ -459,8 +506,10 @@ def to_html(result):
                     cls = "conf-med"
                 else:
                     cls = "conf-low"
-                # AIDEV-NOTE: html.escape required here — word text may contain angle brackets (XSS)
-                word_parts.append(f'<span class="{cls}" title="{p:.2f}">{_html.escape(w["word"])}</span>')
+                # AIDEV-NOTE: html.escape required — word text may contain angle brackets (XSS)
+                word_parts.append(
+                    f'<span class="{cls}" title="{p:.2f}">{_html.escape(w["word"])}</span>'
+                )
             text_html = "".join(word_parts)
         else:
             text_html = _html.escape(seg.get("text", "").strip())
@@ -478,7 +527,8 @@ def to_html(result):
   <title>Transcript: {file_name}</title>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            max-width: 820px; margin: 2em auto; padding: 0 1em; color: #222; line-height: 1.6; }}
+            max-width: 820px; margin: 2em auto; padding: 0 1em;
+            color: #222; line-height: 1.6; }}
     h1 {{ font-size: 1.4em; color: #333; margin-bottom: 0.2em; }}
     .meta {{ color: #888; font-size: 0.85em; margin-bottom: 1.5em; }}
     .seg {{ margin: 0.5em 0; padding: 0.3em 0.5em; border-left: 3px solid #ddd; }}
@@ -512,7 +562,8 @@ def to_html(result):
 # JSON
 # ---------------------------------------------------------------------------
 
-def to_json(result):
+
+def to_json(result: dict[str, Any]) -> str:
     """Format result as JSON."""
     return json.dumps(result, indent=2, ensure_ascii=False)
 
@@ -521,7 +572,8 @@ def to_json(result):
 # Agent compact JSON (for chatbot/agent integration)
 # ---------------------------------------------------------------------------
 
-def _extract_summary_hint(segments):
+
+def _extract_summary_hint(segments: list[Segment]) -> dict[str, str] | None:
     """Extract first and last meaningful sentences for agent preview.
 
     Returns {"first": "...", "last": "..."} or None if transcript is too short.
@@ -551,7 +603,7 @@ def _extract_summary_hint(segments):
     return {"first": first, "last": last}
 
 
-def _compute_avg_confidence(segments):
+def _compute_avg_confidence(segments: list[Segment]) -> float | None:
     """Compute average word confidence across all segments.
 
     Returns float 0.0-1.0 or None if no confidence data available.
@@ -573,7 +625,7 @@ def _compute_avg_confidence(segments):
     return round(sum(confidences) / len(confidences), 4)
 
 
-def format_agent_json(result, backend_name):
+def format_agent_json(result: dict[str, Any], backend_name: str) -> str:
     """Format a result as compact single-line JSON for agent consumption.
 
     Returns fields an agent needs to reply to a user:
@@ -618,24 +670,42 @@ def format_agent_json(result, backend_name):
 # ---------------------------------------------------------------------------
 
 EXT_MAP = {
-    "text": ".txt", "json": ".json", "srt": ".srt", "vtt": ".vtt",
-    "tsv": ".tsv", "csv": ".csv", "lrc": ".lrc",
-    "html": ".html", "ass": ".ass", "ttml": ".ttml",
+    "text": ".txt",
+    "json": ".json",
+    "srt": ".srt",
+    "vtt": ".vtt",
+    "tsv": ".tsv",
+    "csv": ".csv",
+    "lrc": ".lrc",
+    "html": ".html",
+    "ass": ".ass",
+    "ttml": ".ttml",
 }
 
 VALID_FORMATS = {"text", "json", "srt", "vtt", "tsv", "csv", "lrc", "html", "ass", "ttml"}
 
 
-def format_result(result, fmt, max_words_per_line=None, max_chars_per_line=None):
+def format_result(
+    result: dict[str, Any],
+    fmt: str,
+    max_words_per_line: int | None = None,
+    max_chars_per_line: int | None = None,
+) -> str:
     """Render a result dict in the requested format."""
     if fmt == "json":
         return to_json(result)
     if fmt == "srt":
-        return to_srt(result["segments"], max_words_per_line=max_words_per_line,
-                      max_chars_per_line=max_chars_per_line)
+        return to_srt(
+            result["segments"],
+            max_words_per_line=max_words_per_line,
+            max_chars_per_line=max_chars_per_line,
+        )
     if fmt == "vtt":
-        return to_vtt(result["segments"], max_words_per_line=max_words_per_line,
-                      max_chars_per_line=max_chars_per_line)
+        return to_vtt(
+            result["segments"],
+            max_words_per_line=max_words_per_line,
+            max_chars_per_line=max_chars_per_line,
+        )
     if fmt == "tsv":
         return to_tsv(result["segments"])
     if fmt == "csv":
@@ -645,8 +715,11 @@ def format_result(result, fmt, max_words_per_line=None, max_chars_per_line=None)
     if fmt == "html":
         return to_html(result)
     if fmt == "ass":
-        return to_ass(result["segments"], max_words_per_line=max_words_per_line,
-                      max_chars_per_line=max_chars_per_line)
+        return to_ass(
+            result["segments"],
+            max_words_per_line=max_words_per_line,
+            max_chars_per_line=max_chars_per_line,
+        )
     if fmt == "ttml":
         return to_ttml(
             result["segments"],

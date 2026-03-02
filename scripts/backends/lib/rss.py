@@ -2,12 +2,16 @@
 Shared RSS feed parsing for super-transcribe backends.
 """
 
+from __future__ import annotations
+
 import sys
 
 from .exitcodes import EXIT_BAD_INPUT
 
 
-def fetch_rss_episodes(rss_url, latest=5, quiet=False):
+def fetch_rss_episodes(
+    rss_url: str, latest: int = 5, quiet: bool = False
+) -> list[tuple[str, str]]:
     """Parse a podcast RSS feed and return audio enclosure URLs.
     Returns list of (url, title) tuples, newest-first.
     """
@@ -18,12 +22,10 @@ def fetch_rss_episodes(rss_url, latest=5, quiet=False):
         print(f"📡 Fetching RSS feed: {rss_url}", file=sys.stderr)
 
     try:
-        req = urllib.request.Request(
-            rss_url, headers={"User-Agent": "super-transcribe/1.0"}
-        )
+        req = urllib.request.Request(rss_url, headers={"User-Agent": "super-transcribe/1.0"})
         with urllib.request.urlopen(req, timeout=30) as resp:
             xml_data = resp.read()
-    except Exception as e:
+    except (urllib.error.URLError, OSError, ValueError) as e:
         print(f"Error fetching RSS feed: {e}", file=sys.stderr)
         sys.exit(EXIT_BAD_INPUT)
 

@@ -25,6 +25,12 @@ TEST-SCENARIOS*
 .ruff_cache/
 .pytest_cache/
 
+# Runtime venvs (created on first use)
+.venv/
+venv/
+scripts/backends/faster-whisper/.venv/
+scripts/backends/parakeet/venv/
+
 # Python artifacts
 __pycache__/
 *.pyc

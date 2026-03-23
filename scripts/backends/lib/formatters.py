@@ -210,6 +210,22 @@ def to_vtt(
 # ---------------------------------------------------------------------------
 
 
+def _ensure_spacing(text: str) -> str:
+    """Ensure proper spacing between concatenated segments.
+
+    Transcription segments sometimes lack trailing/leading spaces, causing
+    joined text like 'world.And' instead of 'world. And'.  This adds a
+    space after sentence-ending punctuation (.?!) when followed by an
+    uppercase letter, and after commas followed by uppercase letters.
+    """
+    import re
+    # Fix: period/question/exclamation followed directly by uppercase letter
+    text = re.sub(r'([.?!])([A-Z])', r'\1 \2', text)
+    # Fix: comma followed directly by uppercase letter
+    text = re.sub(r',([A-Z])', r', \1', text)
+    return text
+
+
 def to_text(segments: list[Segment]) -> str:
     """Format segments as plain text, with speaker labels if present."""
     has_speakers = any(seg.get("speaker") for seg in segments)
@@ -217,13 +233,15 @@ def to_text(segments: list[Segment]) -> str:
 
     if not has_speakers:
         if not has_paragraphs:
-            return " ".join(seg["text"].strip() for seg in segments if seg["text"].strip())
+            return _ensure_spacing(
+                " ".join(seg["text"].strip() for seg in segments if seg["text"].strip())
+            )
         parts = []
         for seg in segments:
             if seg.get("paragraph_start") and parts:
                 parts.append("\n\n")
             parts.append(seg["text"])
-        return "".join(parts).strip()
+        return _ensure_spacing("".join(parts).strip())
 
     lines = []
     current_speaker = None
@@ -236,8 +254,14 @@ def to_text(segments: list[Segment]) -> str:
             lines.append(f"\n[{sp}] ")
         elif lines and not lines[-1].endswith(("\n", " ")):
             lines.append(" ")
-        lines.append(seg["text"].strip())
-    return "".join(lines).strip()
+        text = seg["text"].strip()
+        # Ensure segment text doesn't start jammed against previous punctuation
+        if lines and lines[-1] and not lines[-1][-1].isspace():
+            last_char = lines[-1][-1]
+            if last_char in '.?!' and text and text[0].isupper():
+                lines.append(" ")
+        lines.append(text)
+    return _ensure_spacing("".join(lines).strip())
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +716,9 @@ def format_result(
     max_chars_per_line: int | None = None,
 ) -> str:
     """Render a result dict in the requested format."""
+    # Ensure spacing in the top-level text field (used by agent mode, etc.)
+    if "text" in result and isinstance(result["text"], str):
+        result["text"] = _ensure_spacing(result["text"])
     if fmt == "json":
         return to_json(result)
     if fmt == "srt":

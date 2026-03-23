@@ -20,6 +20,7 @@ import copy
 import fnmatch
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -192,29 +193,228 @@ def run_diarization(
             # Fall back to original file if conversion fails
             tmp_wav = None
 
-    try:
-        diarize_kwargs = {}
-        if min_speakers is not None:
-            diarize_kwargs["min_speakers"] = min_speakers
-        if max_speakers is not None:
-            diarize_kwargs["max_speakers"] = max_speakers
-        diarize_result = pipeline(diarize_path, **diarize_kwargs)
-    finally:
-        if tmp_wav and os.path.exists(tmp_wav):
-            os.remove(tmp_wav)
+    # --- Chunked diarization for long audio ---
+    # pyannote's speaker embedding matrix scales quadratically with duration,
+    # causing OOM on GPU for audio >~20 min (e.g. 72GB alloc for 3h on 8GB GPU).
+    # Solution: split into overlapping chunks, diarize each, merge timelines,
+    # and reconcile speaker labels across chunks using overlap regions.
+    CHUNK_DURATION = 900  # 15-minute chunks
+    OVERLAP = 60          # 60-second overlap for speaker label matching
 
-    # pyannote 4.x returns DiarizeOutput with .speaker_diarization attribute;
-    # pyannote 3.x returns an Annotation directly
-    if hasattr(diarize_result, "speaker_diarization"):
-        annotation = diarize_result.speaker_diarization
+    def _get_audio_duration(path):
+        """Get audio duration in seconds via ffprobe."""
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", path],
+                capture_output=True, text=True, check=True,
+            )
+            return float(result.stdout.strip())
+        except Exception:
+            return 0
+
+    audio_duration = _get_audio_duration(diarize_path)
+
+    if audio_duration > CHUNK_DURATION + OVERLAP:
+        # Long audio: process in chunks
+        if not quiet:
+            n_chunks = math.ceil(audio_duration / CHUNK_DURATION)
+            print(f"   Audio is {audio_duration/60:.0f}min — diarizing in {n_chunks} chunks "
+                  f"({CHUNK_DURATION//60}min + {OVERLAP}s overlap)...", file=sys.stderr)
+
+        import tempfile
+
+        chunk_dir = tempfile.mkdtemp(prefix="diarize_chunks_")
+        all_chunk_timelines = []
+
+        try:
+            # Split into overlapping chunks
+            offset = 0
+            chunk_idx = 0
+            while offset < audio_duration:
+                chunk_end = min(offset + CHUNK_DURATION + OVERLAP, audio_duration)
+                chunk_path = os.path.join(chunk_dir, f"chunk_{chunk_idx:03d}.wav")
+
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", diarize_path,
+                     "-ss", str(offset), "-to", str(chunk_end),
+                     "-ar", "16000", "-ac", "1", chunk_path],
+                    check=True, capture_output=True,
+                )
+
+                if not quiet:
+                    print(f"   Diarizing chunk {chunk_idx + 1} "
+                          f"({offset/60:.0f}-{chunk_end/60:.0f}min)...", file=sys.stderr)
+
+                try:
+                    diarize_kwargs = {}
+                    if min_speakers is not None:
+                        diarize_kwargs["min_speakers"] = min_speakers
+                    if max_speakers is not None:
+                        diarize_kwargs["max_speakers"] = max_speakers
+                    chunk_result = pipeline(chunk_path, **diarize_kwargs)
+                except Exception as e:
+                    if not quiet:
+                        print(f"   ⚠️  Chunk {chunk_idx + 1} diarization failed: {e}",
+                              file=sys.stderr)
+                    offset += CHUNK_DURATION
+                    chunk_idx += 1
+                    continue
+
+                if hasattr(chunk_result, "speaker_diarization"):
+                    chunk_ann = chunk_result.speaker_diarization
+                else:
+                    chunk_ann = chunk_result
+
+                # Shift timestamps back to global time
+                chunk_timeline = []
+                for turn, _, speaker in chunk_ann.itertracks(yield_label=True):
+                    chunk_timeline.append({
+                        "start": turn.start + offset,
+                        "end": turn.end + offset,
+                        "speaker": f"chunk{chunk_idx}_{speaker}",
+                    })
+                all_chunk_timelines.append({
+                    "offset": offset,
+                    "end": chunk_end,
+                    "timeline": chunk_timeline,
+                })
+
+                # Clean up chunk file immediately
+                try:
+                    os.remove(chunk_path)
+                except Exception:
+                    pass
+
+                offset += CHUNK_DURATION
+                chunk_idx += 1
+
+            # Reconcile speaker labels across chunks using overlap regions
+            # For each pair of adjacent chunks, find the best mapping from
+            # chunk N+1's speakers to chunk N's speakers based on overlap time.
+            global_speaker_map = {}  # chunk-local label -> global label
+
+            if all_chunk_timelines:
+                # First chunk's speakers become the baseline
+                for entry in all_chunk_timelines[0]["timeline"]:
+                    sp = entry["speaker"]
+                    if sp not in global_speaker_map:
+                        global_speaker_map[sp] = sp
+
+                # For each subsequent chunk, match via overlap
+                for ci in range(1, len(all_chunk_timelines)):
+                    prev = all_chunk_timelines[ci - 1]
+                    curr = all_chunk_timelines[ci]
+                    overlap_start = curr["offset"]
+                    overlap_end = min(prev["end"], curr["end"])
+
+                    if overlap_end <= overlap_start:
+                        # No actual overlap — just assign new global labels
+                        for entry in curr["timeline"]:
+                            sp = entry["speaker"]
+                            if sp not in global_speaker_map:
+                                global_speaker_map[sp] = sp
+                        continue
+
+                    # Get speakers active in overlap from each chunk
+                    prev_overlap = {}
+                    for e in prev["timeline"]:
+                        if e["end"] > overlap_start and e["start"] < overlap_end:
+                            sp = global_speaker_map.get(e["speaker"], e["speaker"])
+                            seg_start = max(e["start"], overlap_start)
+                            seg_end = min(e["end"], overlap_end)
+                            prev_overlap.setdefault(sp, 0)
+                            prev_overlap[sp] += seg_end - seg_start
+
+                    curr_overlap = {}
+                    for e in curr["timeline"]:
+                        if e["end"] > overlap_start and e["start"] < overlap_end:
+                            sp = e["speaker"]
+                            seg_start = max(e["start"], overlap_start)
+                            seg_end = min(e["end"], overlap_end)
+                            curr_overlap.setdefault(sp, [])
+                            curr_overlap[sp].append((seg_start, seg_end))
+
+                    # Match current chunk speakers to previous chunk speakers
+                    # by maximum time overlap
+                    for curr_sp, curr_ranges in curr_overlap.items():
+                        best_match = None
+                        best_score = 0
+                        for prev_sp, prev_time in prev_overlap.items():
+                            # Compute time that curr_sp overlaps with prev_sp
+                            score = 0
+                            for cs, ce in curr_ranges:
+                                for pe in prev["timeline"]:
+                                    pe_sp = global_speaker_map.get(
+                                        pe["speaker"], pe["speaker"])
+                                    if pe_sp != prev_sp:
+                                        continue
+                                    ov_s = max(cs, pe["start"])
+                                    ov_e = min(ce, pe["end"])
+                                    if ov_e > ov_s:
+                                        score += ov_e - ov_s
+                            if score > best_score:
+                                best_score = score
+                                best_match = prev_sp
+                        if best_match:
+                            global_speaker_map[curr_sp] = best_match
+                        else:
+                            global_speaker_map[curr_sp] = curr_sp
+
+            # Build merged timeline with global speaker labels, preferring
+            # non-overlap regions (use prev chunk for overlap zone)
+            timeline = []
+            for ci, chunk_data in enumerate(all_chunk_timelines):
+                for entry in chunk_data["timeline"]:
+                    # In overlap zones, skip entries from the later chunk
+                    # (the previous chunk's data is more reliable there)
+                    if ci > 0:
+                        prev_end = all_chunk_timelines[ci - 1]["end"]
+                        if entry["start"] < prev_end - 1:  # -1s buffer
+                            continue
+                    timeline.append({
+                        "start": entry["start"],
+                        "end": entry["end"],
+                        "speaker": global_speaker_map.get(
+                            entry["speaker"], entry["speaker"]),
+                    })
+
+        finally:
+            # Clean up chunk directory
+            import shutil
+            try:
+                shutil.rmtree(chunk_dir, ignore_errors=True)
+            except Exception:
+                pass
     else:
-        annotation = diarize_result
+        # Short audio: process in one shot (original behavior)
+        try:
+            diarize_kwargs = {}
+            if min_speakers is not None:
+                diarize_kwargs["min_speakers"] = min_speakers
+            if max_speakers is not None:
+                diarize_kwargs["max_speakers"] = max_speakers
+            diarize_result = pipeline(diarize_path, **diarize_kwargs)
+        finally:
+            if tmp_wav and os.path.exists(tmp_wav):
+                os.remove(tmp_wav)
 
-    # Build speaker timeline
-    timeline = [
-        {"start": turn.start, "end": turn.end, "speaker": speaker}
-        for turn, _, speaker in annotation.itertracks(yield_label=True)
-    ]
+        # pyannote 4.x returns DiarizeOutput with .speaker_diarization attribute;
+        # pyannote 3.x returns an Annotation directly
+        if hasattr(diarize_result, "speaker_diarization"):
+            annotation = diarize_result.speaker_diarization
+        else:
+            annotation = diarize_result
+
+        # Build speaker timeline
+        timeline = [
+            {"start": turn.start, "end": turn.end, "speaker": speaker}
+            for turn, _, speaker in annotation.itertracks(yield_label=True)
+        ]
+
+    # Clean up WAV conversion for long audio case (short audio cleans up above)
+    if tmp_wav and os.path.exists(tmp_wav):
+        os.remove(tmp_wav)
 
     def speaker_at(t):
         """Find the speaker at a given timestamp by max overlap with a point."""

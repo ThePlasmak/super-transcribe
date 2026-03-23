@@ -1,7 +1,7 @@
 ---
 name: super-transcribe
 description: "Unified speech-to-text skill. Use when the user asks to transcribe audio or video, generate subtitles, identify speakers, translate speech, search transcripts, diarize meetings, or perform any speech-to-text task. Also use when a voice message or audio file appears in chat and the user's intent to transcribe it is very clear."
-version: 1.0.3
+version: 1.0.4
 author: Sarah Mak
 tags:
   [

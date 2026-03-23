@@ -1,6 +1,6 @@
 {
   "name": "super-transcribe",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Unified speech-to-text that auto-routes to the best backend (faster-whisper or parakeet). Lazy-loads backends on first use.",
   "author": "Sarah Mak",
   "tags": [
